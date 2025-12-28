@@ -1,0 +1,27 @@
+[Unit]
+Description=Polymarket Copytrade Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/polymarket
+Environment=NODE_ENV=production
+Environment=CONFIRM=YES_TO_COPYTRADE
+Environment=POLL_INTERVAL=60
+Environment=MAX_TRADE_AGE=60
+EnvironmentFile=/home/ubuntu/polymarket/.env
+ExecStart=/usr/bin/node /home/ubuntu/polymarket/dist/copytrade/daemon.js
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/polymarket/data
+
+[Install]
+WantedBy=multi-user.target

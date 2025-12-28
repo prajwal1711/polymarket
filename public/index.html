@@ -1,0 +1,687 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Polymarket Dashboard</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, system-ui, sans-serif; background: #0a0a0a; color: #e0e0e0; padding: 20px; }
+    h1 { font-size: 1.5rem; margin-bottom: 20px; color: #fff; }
+    h2 { font-size: 1.1rem; margin-bottom: 10px; color: #888; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 15px; margin-bottom: 20px; }
+    .card { background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 15px; }
+    .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+    .stat { font-size: 1.8rem; font-weight: bold; color: #4ade80; }
+    .stat.warning { color: #fbbf24; }
+    .stat.danger { color: #f87171; }
+    .label { font-size: 0.8rem; color: #666; text-transform: uppercase; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    th, td { text-align: left; padding: 8px; border-bottom: 1px solid #333; }
+    th { color: #888; font-weight: normal; }
+    tr:hover { background: #222; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; }
+    .badge-green { background: #166534; color: #4ade80; }
+    .badge-red { background: #7f1d1d; color: #f87171; }
+    .badge-yellow { background: #713f12; color: #fbbf24; }
+    button { background: #333; color: #fff; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 0.85rem; }
+    button:hover { background: #444; }
+    button.danger { background: #7f1d1d; }
+    button.danger:hover { background: #991b1b; }
+    button.success { background: #166534; }
+    button.success:hover { background: #15803d; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .toggle { display: flex; align-items: center; gap: 10px; }
+    .toggle input { width: 40px; height: 20px; }
+    input[type="number"] { background: #222; border: 1px solid #444; color: #fff; padding: 6px 10px; border-radius: 4px; width: 100px; }
+    .flex { display: flex; gap: 10px; align-items: center; }
+    .mt { margin-top: 15px; }
+    .text-sm { font-size: 0.8rem; }
+    .text-muted { color: #666; }
+    .truncate { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #status { position: fixed; bottom: 20px; right: 20px; padding: 10px 15px; border-radius: 4px; display: none; }
+    #status.success { display: block; background: #166534; }
+    #status.error { display: block; background: #7f1d1d; }
+    .warning-box { background: #7f1d1d; border: 1px solid #f87171; padding: 10px; border-radius: 4px; margin-bottom: 15px; }
+  </style>
+</head>
+<body>
+  <h1>Polymarket Dashboard</h1>
+
+  <div id="readonly-warning" class="warning-box" style="display:none;">
+    READ-ONLY MODE ACTIVE - No orders will be placed
+  </div>
+
+  <!-- Strategy Cards -->
+  <div class="card" style="margin-bottom: 15px;">
+    <div class="card-header">
+      <h2>Strategies</h2>
+      <div class="flex">
+        <button onclick="showNewStrategyModal()">+ New Strategy</button>
+        <button onclick="loadStrategies()">Refresh</button>
+      </div>
+    </div>
+    <div id="strategies-container" class="grid" style="margin-top: 10px;">
+      <div class="text-muted">Loading strategies...</div>
+    </div>
+  </div>
+
+  <!-- New Strategy Modal (hidden by default) -->
+  <div id="new-strategy-modal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.8); z-index:1000; padding:20px;">
+    <div class="card" style="max-width:400px; margin:100px auto;">
+      <h2>Create New Strategy</h2>
+      <div class="mt">
+        <label>ID (slug):</label>
+        <input type="text" id="new-strategy-id" placeholder="e.g., momentum_play" style="width:100%; margin-top:5px;">
+      </div>
+      <div class="mt">
+        <label>Name:</label>
+        <input type="text" id="new-strategy-name" placeholder="e.g., Momentum Play" style="width:100%; margin-top:5px;">
+      </div>
+      <div class="mt">
+        <label>Description:</label>
+        <input type="text" id="new-strategy-desc" placeholder="e.g., Buy trending markets" style="width:100%; margin-top:5px;">
+      </div>
+      <div class="mt">
+        <label>Color:</label>
+        <input type="color" id="new-strategy-color" value="#4ade80" style="margin-left:10px;">
+      </div>
+      <div class="flex mt" style="justify-content:flex-end;">
+        <button onclick="hideNewStrategyModal()">Cancel</button>
+        <button onclick="createStrategy()" class="success">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Rotation Progress -->
+  <div class="card" style="margin-bottom: 15px; border: 1px solid #4ade80;">
+    <div class="card-header">
+      <h2>Rotation Progress</h2>
+      <button onclick="loadRotationStats()">Refresh</button>
+    </div>
+    <div class="grid" style="margin-top: 10px;">
+      <div>
+        <div class="label">Fills / Target</div>
+        <div class="stat"><span id="rotation-fills">0</span> / 1000</div>
+        <div class="text-sm text-muted"><span id="rotation-progress">0</span>% complete</div>
+      </div>
+      <div>
+        <div class="label">Markets Attempted</div>
+        <div class="stat" id="rotation-attempted">0</div>
+        <div class="text-sm text-muted">Fill rate: <span id="rotation-fill-rate">0</span>%</div>
+      </div>
+      <div>
+        <div class="label">Markets Remaining</div>
+        <div class="stat" id="rotation-remaining">0</div>
+        <div class="text-sm text-muted">Untried markets</div>
+      </div>
+      <div>
+        <div class="label">Run Rotation</div>
+        <div class="text-sm text-muted" style="margin-top:10px;">
+          <code style="background:#222; padding:5px 10px; border-radius:4px;">npm run rotate</code>
+        </div>
+      </div>
+    </div>
+    <div style="margin-top: 15px; background: #222; border-radius: 4px; height: 20px; overflow: hidden;">
+      <div id="rotation-progress-bar" style="background: #4ade80; height: 100%; width: 0%; transition: width 0.3s;"></div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <div class="label">Open Orders</div>
+      <div class="stat" id="open-orders">-</div>
+      <div class="text-sm text-muted">Pending floor bids</div>
+    </div>
+    <div class="card">
+      <div class="label">Tracked Fills</div>
+      <div class="stat" id="tracked-spent">$0</div>
+      <div class="text-sm text-muted"><span id="tracked-shares">0</span> shares owned</div>
+    </div>
+    <div class="card">
+      <div class="label">Potential Payout</div>
+      <div class="stat" id="potential-payout">-</div>
+      <div class="text-sm text-muted">If all resolve YES</div>
+    </div>
+    <div class="card">
+      <div class="label">Planned Budget</div>
+      <div class="stat" id="planned-cost">-</div>
+      <div class="text-sm text-muted"><span id="planned-orders">-</span> orders planned</div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Guardrails</h2>
+      <div class="flex mt">
+        <label class="toggle">
+          <span>Read-only Mode:</span>
+          <input type="checkbox" id="readonly-mode" checked onchange="updateGuardrails()">
+        </label>
+      </div>
+      <div class="flex mt">
+        <label>Max Order: $</label>
+        <input type="number" id="max-order" value="0.05" step="0.01" min="0.001" max="1" onchange="updateGuardrails()">
+      </div>
+      <div class="flex mt">
+        <label>Max Daily: $</label>
+        <input type="number" id="max-daily" value="1.00" step="0.1" min="0.1" max="10" onchange="updateGuardrails()">
+      </div>
+    </div>
+    <div class="card">
+      <h2>Quick Actions</h2>
+      <div class="flex mt">
+        <button onclick="placeNextOrder()" class="success" id="place-order-btn" disabled>Place Next Order</button>
+      </div>
+      <div class="text-sm text-muted mt" id="next-order-info">-</div>
+    </div>
+  </div>
+
+  <div class="card mt">
+    <div class="card-header">
+      <h2>Planned Orders (Valid)</h2>
+      <button onclick="loadPlannedOrders()">Refresh</button>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Market</th>
+          <th>Price</th>
+          <th>Size</th>
+          <th>Cost</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody id="planned-orders-table">
+        <tr><td colspan="5" class="text-muted">Loading...</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card mt">
+    <div class="card-header">
+      <h2>Open Orders</h2>
+      <button onclick="loadOpenOrders()">Refresh</button>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Order ID</th>
+          <th>Side</th>
+          <th>Price</th>
+          <th>Size</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody id="open-orders-table">
+        <tr><td colspan="5" class="text-muted">Loading...</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card mt">
+    <div class="card-header">
+      <h2>Positions by Resolution Date</h2>
+      <div class="flex">
+        <select id="position-strategy-filter" onchange="loadPositions()" style="background:#222; color:#fff; border:1px solid #444; padding:6px 10px; border-radius:4px;">
+          <option value="">All Strategies</option>
+        </select>
+        <button onclick="loadPositions()">Refresh</button>
+      </div>
+    </div>
+    <div class="text-sm text-muted" style="margin-bottom: 10px;">
+      Sorted by soonest resolution first. <span id="position-summary"></span>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Resolution</th>
+          <th>Market</th>
+          <th>Outcome</th>
+          <th>Shares</th>
+          <th>Avg Price</th>
+          <th>Cost</th>
+          <th>Potential</th>
+          <th>ROI</th>
+        </tr>
+      </thead>
+      <tbody id="positions-table">
+        <tr><td colspan="8" class="text-muted">Loading...</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card mt">
+    <div class="card-header">
+      <h2>Recent Floor Trades</h2>
+      <button onclick="loadTrades()">Refresh</button>
+    </div>
+    <div class="text-sm text-muted" style="margin-bottom:10px;">Only showing trades at floor prices (&lt;$0.10)</div>
+    <table>
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th>Side</th>
+          <th>Price</th>
+          <th>Shares</th>
+          <th>Cost</th>
+        </tr>
+      </thead>
+      <tbody id="trades-table">
+        <tr><td colspan="5" class="text-muted">Loading...</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div id="status"></div>
+
+  <script>
+    let plannedOrders = [];
+    let guardrails = {};
+    let strategies = [];
+    let selectedStrategy = null;
+
+    async function api(path, options = {}) {
+      const res = await fetch('/api' + path, {
+        headers: { 'Content-Type': 'application/json' },
+        ...options,
+        body: options.body ? JSON.stringify(options.body) : undefined,
+      });
+      return res.json();
+    }
+
+    function showStatus(msg, type = 'success') {
+      const el = document.getElementById('status');
+      el.textContent = msg;
+      el.className = type;
+      setTimeout(() => el.className = '', 3000);
+    }
+
+    async function loadRotationStats() {
+      try {
+        const data = await api('/rotation-stats');
+        document.getElementById('rotation-fills').textContent = data.totalFilled;
+        document.getElementById('rotation-progress').textContent = data.progress.toFixed(1);
+        document.getElementById('rotation-attempted').textContent = data.totalAttempted;
+        document.getElementById('rotation-fill-rate').textContent = data.fillRate.toFixed(2);
+        document.getElementById('rotation-remaining').textContent = data.marketsRemaining;
+        document.getElementById('rotation-progress-bar').style.width = data.progress + '%';
+      } catch (e) {
+        console.error('Failed to load rotation stats:', e);
+      }
+    }
+
+    async function loadSummary() {
+      const data = await api('/summary');
+
+      // Plan stats
+      if (data.latestPlan) {
+        document.getElementById('planned-cost').textContent = '$' + (data.latestPlan.total_cost || 0).toFixed(2);
+        document.getElementById('planned-orders').textContent = data.latestPlan.valid_orders;
+      }
+
+      // Tracked stats (source of truth for spending)
+      if (data.trackedStats) {
+        document.getElementById('tracked-spent').textContent = '$' + data.trackedStats.totalSpent.toFixed(2);
+        document.getElementById('tracked-shares').textContent = data.trackedStats.totalShares.toFixed(0);
+        document.getElementById('potential-payout').textContent = '$' + data.trackedStats.totalShares.toFixed(0);
+      }
+
+      guardrails = data.guardrails;
+      document.getElementById('readonly-mode').checked = guardrails.readOnlyMode;
+      document.getElementById('max-order').value = guardrails.maxSingleOrderCost;
+      document.getElementById('max-daily').value = guardrails.maxDailySpend;
+      document.getElementById('readonly-warning').style.display = guardrails.readOnlyMode ? 'block' : 'none';
+      document.getElementById('place-order-btn').disabled = guardrails.readOnlyMode;
+    }
+
+    async function loadPlannedOrders() {
+      const orders = await api('/planned-orders?valid=true&limit=20');
+      plannedOrders = orders;
+      const tbody = document.getElementById('planned-orders-table');
+
+      if (orders.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" class="text-muted">No valid orders</td></tr>';
+        document.getElementById('next-order-info').textContent = 'No orders available';
+        return;
+      }
+
+      tbody.innerHTML = orders.map((o, i) => `
+        <tr>
+          <td class="truncate" title="${o.question}">${o.question}</td>
+          <td>$${parseFloat(o.price).toFixed(4)}</td>
+          <td>${o.size}</td>
+          <td>$${parseFloat(o.cost).toFixed(4)}</td>
+          <td><button onclick="placeOrder(${i})" ${guardrails.readOnlyMode ? 'disabled' : ''}>Place</button></td>
+        </tr>
+      `).join('');
+
+      const next = orders[0];
+      document.getElementById('next-order-info').textContent =
+        `Next: ${next.question.substring(0, 40)}... @ $${parseFloat(next.cost).toFixed(4)}`;
+    }
+
+    async function loadOpenOrders() {
+      try {
+        const orders = await api('/open-orders');
+        document.getElementById('open-orders').textContent = orders.length;
+        const tbody = document.getElementById('open-orders-table');
+
+        if (orders.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="5" class="text-muted">No open orders</td></tr>';
+          return;
+        }
+
+        tbody.innerHTML = orders.map(o => `
+          <tr>
+            <td class="truncate" title="${o.id}">${o.id.substring(0, 16)}...</td>
+            <td><span class="badge ${o.side === 'BUY' ? 'badge-green' : 'badge-red'}">${o.side}</span></td>
+            <td>$${parseFloat(o.price).toFixed(4)}</td>
+            <td>${o.original_size}</td>
+            <td><button onclick="cancelOrder('${o.id}')" class="danger">Cancel</button></td>
+          </tr>
+        `).join('');
+      } catch (e) {
+        document.getElementById('open-orders').textContent = '?';
+        showStatus('Failed to load open orders', 'error');
+      }
+    }
+
+    async function loadTrades() {
+      try {
+        const trades = await api('/trades');
+        const tbody = document.getElementById('trades-table');
+
+        if (trades.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="5" class="text-muted">No recent trades</td></tr>';
+          return;
+        }
+
+        // Show only floor-price trades (< $0.10) as these are our actual fills
+        const floorTrades = trades.filter(t => parseFloat(t.price) < 0.10);
+
+        tbody.innerHTML = floorTrades.slice(0, 15).map(t => `
+          <tr>
+            <td>${new Date(t.match_time || t.created_at || t.timestamp).toLocaleString()}</td>
+            <td><span class="badge ${t.side === 'BUY' ? 'badge-green' : 'badge-red'}">${t.side}</span></td>
+            <td>$${parseFloat(t.price).toFixed(4)}</td>
+            <td>${parseFloat(t.size).toFixed(1)}</td>
+            <td>$${(parseFloat(t.price) * parseFloat(t.size)).toFixed(4)}</td>
+          </tr>
+        `).join('');
+      } catch (e) {
+        showStatus('Failed to load trades', 'error');
+      }
+    }
+
+    async function loadStrategies() {
+      try {
+        strategies = await api('/strategies');
+        const container = document.getElementById('strategies-container');
+        const filter = document.getElementById('position-strategy-filter');
+
+        // Update filter dropdown
+        filter.innerHTML = '<option value="">All Strategies</option>' +
+          strategies.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
+
+        if (strategies.length === 0) {
+          container.innerHTML = '<div class="text-muted">No strategies yet. Create one to start tracking!</div>';
+          return;
+        }
+
+        container.innerHTML = strategies.map(s => `
+          <div class="card" style="border-left: 4px solid ${s.color}; cursor: pointer;" onclick="selectStrategy('${s.id}')">
+            <div class="flex" style="justify-content: space-between;">
+              <div>
+                <strong style="color: ${s.color}">${s.name}</strong>
+                <div class="text-sm text-muted">${s.description || 'No description'}</div>
+              </div>
+              <div style="text-align: right;">
+                <div class="stat" style="font-size: 1.2rem;">${s.stats.roi.toFixed(0)}%</div>
+                <div class="text-sm text-muted">ROI</div>
+              </div>
+            </div>
+            <div class="flex mt" style="justify-content: space-between;">
+              <div>
+                <span class="text-muted">Trades:</span> ${s.stats.totalTrades}
+              </div>
+              <div>
+                <span class="text-muted">Cost:</span> $${s.stats.totalCost.toFixed(2)}
+              </div>
+              <div>
+                <span class="text-muted">Potential:</span> $${s.stats.potentialPayout.toFixed(0)}
+              </div>
+            </div>
+            <div class="flex mt" style="gap: 5px;">
+              <button onclick="event.stopPropagation(); importTrades('${s.id}')" class="text-sm">Import Trades</button>
+            </div>
+          </div>
+        `).join('');
+      } catch (e) {
+        console.error('Failed to load strategies:', e);
+        showStatus('Failed to load strategies', 'error');
+      }
+    }
+
+    function selectStrategy(strategyId) {
+      selectedStrategy = strategyId;
+      document.getElementById('position-strategy-filter').value = strategyId;
+      loadPositions();
+    }
+
+    function showNewStrategyModal() {
+      document.getElementById('new-strategy-modal').style.display = 'block';
+    }
+
+    function hideNewStrategyModal() {
+      document.getElementById('new-strategy-modal').style.display = 'none';
+    }
+
+    async function createStrategy() {
+      const id = document.getElementById('new-strategy-id').value.trim();
+      const name = document.getElementById('new-strategy-name').value.trim();
+      const description = document.getElementById('new-strategy-desc').value.trim();
+      const color = document.getElementById('new-strategy-color').value;
+
+      if (!id || !name) {
+        showStatus('ID and Name are required', 'error');
+        return;
+      }
+
+      try {
+        await api('/strategies', {
+          method: 'POST',
+          body: { id, name, description, color }
+        });
+        hideNewStrategyModal();
+        showStatus('Strategy created!');
+        loadStrategies();
+      } catch (e) {
+        showStatus('Failed to create strategy', 'error');
+      }
+    }
+
+    async function importTrades(strategyId) {
+      if (!confirm(`Import all existing trades to "${strategyId}" strategy?`)) return;
+
+      try {
+        const result = await api(`/strategies/${strategyId}/import-trades`, { method: 'POST' });
+        showStatus(`Imported ${result.imported} trades`);
+        loadStrategies();
+        loadPositions();
+      } catch (e) {
+        showStatus('Failed to import trades', 'error');
+      }
+    }
+
+    async function loadPositions() {
+      try {
+        const strategyFilter = document.getElementById('position-strategy-filter').value;
+        let positions;
+
+        if (strategyFilter) {
+          positions = await api(`/strategies/${strategyFilter}/positions`);
+        } else {
+          positions = await api('/positions');
+        }
+
+        const tbody = document.getElementById('positions-table');
+        const summary = document.getElementById('position-summary');
+
+        if (positions.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="8" class="text-muted">No positions found</td></tr>';
+          summary.textContent = '';
+          return;
+        }
+
+        // Calculate totals
+        let totalCost = 0;
+        let totalPotential = 0;
+        positions.forEach(p => {
+          totalCost += p.totalCost || 0;
+          totalPotential += p.potentialPayout || 0;
+        });
+        const overallROI = totalCost > 0 ? ((totalPotential / totalCost) - 1) * 100 : 0;
+        summary.innerHTML = `<strong>${positions.length} positions</strong> | Cost: $${totalCost.toFixed(2)} | Potential: $${totalPotential.toFixed(0)} | <span class="stat" style="font-size: 1rem;">${overallROI.toFixed(0)}% ROI</span>`;
+
+        tbody.innerHTML = positions.map(p => {
+          const endDate = p.market?.endDate ? new Date(p.market.endDate) : null;
+          const now = new Date();
+          const daysUntil = endDate ? Math.ceil((endDate - now) / (1000 * 60 * 60 * 24)) : null;
+
+          let dateDisplay = 'Unknown';
+          let dateClass = '';
+          if (endDate) {
+            if (daysUntil <= 0) {
+              dateDisplay = 'Resolving soon';
+              dateClass = 'badge-red';
+            } else if (daysUntil <= 7) {
+              dateDisplay = `${daysUntil}d`;
+              dateClass = 'badge-yellow';
+            } else if (daysUntil <= 30) {
+              dateDisplay = `${daysUntil}d`;
+              dateClass = 'badge-green';
+            } else {
+              dateDisplay = endDate.toLocaleDateString();
+            }
+          }
+
+          const question = p.market?.question || 'Unknown market';
+          const slug = p.market?.slug;
+          const marketLink = slug ? `https://polymarket.com/event/${slug}` : '#';
+
+          return `
+            <tr>
+              <td><span class="badge ${dateClass}">${dateDisplay}</span></td>
+              <td class="truncate" title="${question}">
+                <a href="${marketLink}" target="_blank" style="color: #4ade80; text-decoration: none;">${question.substring(0, 50)}${question.length > 50 ? '...' : ''}</a>
+              </td>
+              <td><span class="badge ${p.outcome === 'YES' ? 'badge-green' : 'badge-red'}">${p.outcome}</span></td>
+              <td>${p.totalShares.toFixed(1)}</td>
+              <td>$${p.avgPrice.toFixed(4)}</td>
+              <td>$${p.totalCost.toFixed(4)}</td>
+              <td>$${p.potentialPayout.toFixed(0)}</td>
+              <td><span class="stat" style="font-size: 0.9rem;">${p.currentROI.toFixed(0)}%</span></td>
+            </tr>
+          `;
+        }).join('');
+      } catch (e) {
+        console.error('Failed to load positions:', e);
+        showStatus('Failed to load positions', 'error');
+      }
+    }
+
+    async function updateGuardrails() {
+      const data = {
+        readOnlyMode: document.getElementById('readonly-mode').checked,
+        maxSingleOrderCost: parseFloat(document.getElementById('max-order').value),
+        maxDailySpend: parseFloat(document.getElementById('max-daily').value),
+      };
+      await api('/guardrails', { method: 'POST', body: data });
+      await loadSummary();
+      await loadPlannedOrders();
+      showStatus('Guardrails updated');
+    }
+
+    async function placeNextOrder() {
+      if (plannedOrders.length === 0) {
+        showStatus('No orders available', 'error');
+        return;
+      }
+      await placeOrder(0);
+    }
+
+    async function placeOrder(index) {
+      const order = plannedOrders[index];
+      if (!order) return;
+
+      if (!confirm(`Place order?\n\nMarket: ${order.question}\nPrice: $${order.price}\nSize: ${order.size}\nCost: $${order.cost}`)) {
+        return;
+      }
+
+      try {
+        const result = await api('/place-order', {
+          method: 'POST',
+          body: {
+            marketId: order.market_id,
+            tokenId: order.yes_token_id,
+            price: parseFloat(order.price),
+            size: parseFloat(order.size),
+            side: 'BUY',
+          },
+        });
+
+        if (result.success) {
+          showStatus(`Order placed: ${result.orderID.substring(0, 16)}...`);
+          await loadSummary();
+          await loadPlannedOrders();
+          await loadOpenOrders();
+        } else {
+          showStatus(result.errors?.join(', ') || result.error || 'Failed', 'error');
+        }
+      } catch (e) {
+        showStatus('Failed to place order', 'error');
+      }
+    }
+
+    async function cancelOrder(orderId) {
+      if (!confirm('Cancel this order?')) return;
+      try {
+        await api('/cancel-order', { method: 'POST', body: { orderID: orderId } });
+        showStatus('Order cancelled');
+        await loadOpenOrders();
+      } catch (e) {
+        showStatus('Failed to cancel', 'error');
+      }
+    }
+
+    async function cancelAllOrders() {
+      if (!confirm('Cancel ALL open orders?')) return;
+      try {
+        await api('/cancel-all', { method: 'POST' });
+        showStatus('All orders cancelled');
+        await loadOpenOrders();
+      } catch (e) {
+        showStatus('Failed to cancel', 'error');
+      }
+    }
+
+    // Initial load
+    loadRotationStats();
+    loadStrategies();
+    loadSummary();
+    loadPlannedOrders();
+    loadOpenOrders();
+    loadTrades();
+    loadPositions();
+
+    // Auto-refresh every 30s
+    setInterval(loadRotationStats, 30000);
+    setInterval(loadStrategies, 30000);
+    setInterval(loadSummary, 30000);
+    setInterval(loadOpenOrders, 30000);
+    setInterval(loadTrades, 30000);
+    setInterval(loadPositions, 30000);
+  </script>
+</body>
+</html>

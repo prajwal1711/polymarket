@@ -5,9 +5,9 @@
  * and copying them automatically.
  *
  * Usage:
- *   npm run copytrade:daemon              # Run with default settings
+ *   npm run copytrade:daemon              # Run with default settings (10s poll)
  *   npm run copytrade:daemon -- --dry-run # Dry run mode
- *   POLL_INTERVAL=120 npm run copytrade:daemon  # Poll every 2 minutes
+ *   POLL_INTERVAL=60 npm run copytrade:daemon  # Poll every 60 seconds
  */
 
 import * as dotenv from 'dotenv';
@@ -22,7 +22,7 @@ import { ApiKeyCreds } from '@polymarket/clob-client';
 const DEFAULT_TARGET = '0x063aeee10fbfd55b6def10da28e87a601e7deb4b';
 
 // Configuration from environment
-const POLL_INTERVAL_SEC = parseInt(process.env.POLL_INTERVAL || '60', 10); // Default: 60 seconds
+const POLL_INTERVAL_SEC = parseInt(process.env.POLL_INTERVAL || '10', 10); // Default: 10 seconds
 const DRY_RUN = process.argv.includes('--dry-run');
 const MAX_TRADE_AGE_MIN = parseInt(process.env.MAX_TRADE_AGE || '60', 10); // Default: 60 minutes
 

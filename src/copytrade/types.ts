@@ -158,6 +158,7 @@ export interface CopiedTrade {
   executedAt: string | null;
   marketTitle: string | null;
   marketSlug: string | null;
+  eventSlug: string | null;
   ruleEvaluation: GuardrailEvaluation | null;
 }
 
@@ -234,7 +235,7 @@ export const DEFAULT_CONFIG: CopytradeConfig = {
   maxOriginalPrice: 0.99,       // Maximum 99 cents (copy everything)
 
   // Timing
-  pollIntervalMs: 60000,        // Check every minute
+  pollIntervalMs: 10000,        // Check every 10 seconds
   maxTradeAgeMs: 2592000000,    // 30 days (for testing - reduce for production)
 
   // Safety

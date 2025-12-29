@@ -776,6 +776,7 @@ export class Copier {
       executedAt: null,
       marketTitle: trade.title || null,
       marketSlug: trade.slug || null,
+      eventSlug: trade.eventSlug || null,
       ruleEvaluation: null,
     };
   }

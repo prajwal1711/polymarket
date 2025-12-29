@@ -76,12 +76,13 @@ app.get('/api/positions', (req: Request, res: Response) => {
 
     // Get market info from trades for each position's token
     const trades = storage.getCopiedTrades({ limit: 500 });
-    const marketInfoMap = new Map<string, { title: string; slug: string }>();
+    const marketInfoMap = new Map<string, { title: string; slug: string; eventSlug: string }>();
     for (const trade of trades) {
       if (trade.marketTitle && !marketInfoMap.has(trade.tokenId)) {
         marketInfoMap.set(trade.tokenId, {
           title: trade.marketTitle,
           slug: trade.marketSlug || '',
+          eventSlug: trade.eventSlug || '',
         });
       }
     }
@@ -94,6 +95,7 @@ app.get('/api/positions', (req: Request, res: Response) => {
         targetAlias: aliasMap.get(pos.targetAddress.toLowerCase()) || pos.targetAddress.substring(0, 10) + '...',
         marketTitle: marketInfo?.title || null,
         marketSlug: marketInfo?.slug || null,
+        eventSlug: marketInfo?.eventSlug || null,
       };
     });
 
@@ -1126,7 +1128,7 @@ app.get('/', (req: Request, res: Response) => {
         : positions.map(p => \`
           <tr>
             <td style="font-size:12px;color:#fbbf24" title="\${p.targetAddress}">\${p.targetAlias || '-'}</td>
-            <td style="max-width:250px">\${formatMarket(p.marketTitle, p.marketSlug, null)}</td>
+            <td style="max-width:250px">\${formatMarket(p.marketTitle, p.marketSlug, p.eventSlug, null)}</td>
             <td>\${p.shares.toFixed(1)}</td>
             <td>\${formatMoney(p.avgEntryPrice)}</td>
             <td>\${formatMoney(p.totalCost)}</td>
@@ -1135,9 +1137,11 @@ app.get('/', (req: Request, res: Response) => {
         \`).join('');
     }
 
-    function formatMarket(title, slug, txHash) {
+    function formatMarket(title, slug, eventSlug, txHash) {
       const displayTitle = title ? (title.length > 50 ? title.substring(0, 50) + '...' : title) : 'Unknown';
-      const polyLink = slug ? \`https://polymarket.com/event/\${slug}\` : null;
+      // Correct link format: /event/{eventSlug}/{slug}
+      const polyLink = (eventSlug && slug) ? \`https://polymarket.com/event/\${eventSlug}/\${slug}\` :
+                       eventSlug ? \`https://polymarket.com/event/\${eventSlug}\` : null;
       const txLink = txHash ? \`https://polygonscan.com/tx/\${txHash}\` : null;
 
       let html = \`<span title="\${title || ''}">\${displayTitle}</span>\`;
@@ -1165,7 +1169,7 @@ app.get('/', (req: Request, res: Response) => {
           <tr class="clickable" onclick="showTradeModal('\${t.id}')" title="Click to see guardrail details">
             <td style="white-space:nowrap">\${formatDate(t.createdAt)}</td>
             <td style="font-size:12px;color:#fbbf24" title="\${t.targetAddress}">\${t.targetAlias || '-'}</td>
-            <td style="max-width:250px">\${formatMarket(t.marketTitle, t.marketSlug, t.originalTradeId)}</td>
+            <td style="max-width:250px">\${formatMarket(t.marketTitle, t.marketSlug, t.eventSlug, t.originalTradeId)}</td>
             <td><span class="badge \${t.side.toLowerCase()}">\${t.side}</span></td>
             <td>\${formatMoney(t.copyPrice || t.originalPrice)}</td>
             <td>\${t.copySize ? t.copySize.toFixed(0) : '-'}</td>

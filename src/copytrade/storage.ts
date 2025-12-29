@@ -81,6 +81,9 @@ export class CopytradeStorage {
       this.db.exec(`ALTER TABLE copied_trades ADD COLUMN market_slug TEXT`);
     } catch (e) { /* column exists */ }
     try {
+      this.db.exec(`ALTER TABLE copied_trades ADD COLUMN event_slug TEXT`);
+    } catch (e) { /* column exists */ }
+    try {
       this.db.exec(`ALTER TABLE copied_trades ADD COLUMN rule_evaluation TEXT`);
     } catch (e) { /* column exists */ }
 
@@ -645,8 +648,8 @@ export class CopytradeStorage {
       INSERT OR REPLACE INTO copied_trades (
         id, original_trade_id, target_address, token_id, condition_id,
         side, original_price, original_size, copy_price, copy_size, copy_cost,
-        order_id, status, skip_reason, created_at, executed_at, market_title, market_slug, rule_evaluation
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        order_id, status, skip_reason, created_at, executed_at, market_title, market_slug, event_slug, rule_evaluation
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       trade.id,
       trade.originalTradeId,
@@ -666,6 +669,7 @@ export class CopytradeStorage {
       trade.executedAt,
       trade.marketTitle || null,
       trade.marketSlug || null,
+      trade.eventSlug || null,
       trade.ruleEvaluation ? JSON.stringify(trade.ruleEvaluation) : null
     );
   }
@@ -766,6 +770,7 @@ export class CopytradeStorage {
       executedAt: row.executed_at,
       marketTitle: row.market_title,
       marketSlug: row.market_slug,
+      eventSlug: row.event_slug,
       ruleEvaluation: row.rule_evaluation ? JSON.parse(row.rule_evaluation) : null,
     }));
   }

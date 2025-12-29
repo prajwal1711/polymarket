@@ -72,6 +72,14 @@ export class CopytradeStorage {
       )
     `);
 
+    // Add market_title and market_slug columns if they don't exist
+    try {
+      this.db.exec(`ALTER TABLE copied_trades ADD COLUMN market_title TEXT`);
+    } catch (e) { /* column exists */ }
+    try {
+      this.db.exec(`ALTER TABLE copied_trades ADD COLUMN market_slug TEXT`);
+    } catch (e) { /* column exists */ }
+
     // Table for tracking the last seen trade timestamp per target
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS copy_cursors (
@@ -206,8 +214,8 @@ export class CopytradeStorage {
       INSERT OR REPLACE INTO copied_trades (
         id, original_trade_id, target_address, token_id, condition_id,
         side, original_price, original_size, copy_price, copy_size, copy_cost,
-        order_id, status, skip_reason, created_at, executed_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        order_id, status, skip_reason, created_at, executed_at, market_title, market_slug
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       trade.id,
       trade.originalTradeId,
@@ -224,7 +232,9 @@ export class CopytradeStorage {
       trade.status,
       trade.skipReason,
       trade.createdAt,
-      trade.executedAt
+      trade.executedAt,
+      trade.marketTitle || null,
+      trade.marketSlug || null
     );
   }
 
@@ -322,6 +332,8 @@ export class CopytradeStorage {
       skipReason: row.skip_reason,
       createdAt: row.created_at,
       executedAt: row.executed_at,
+      marketTitle: row.market_title,
+      marketSlug: row.market_slug,
     }));
   }
 

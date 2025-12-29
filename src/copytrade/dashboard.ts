@@ -399,10 +399,9 @@ app.get('/', (req: Request, res: Response) => {
         <thead>
           <tr>
             <th>Time</th>
+            <th>Market</th>
             <th>Side</th>
             <th>Price</th>
-            <th>Size</th>
-            <th>Cost</th>
             <th>Status</th>
             <th>Reason</th>
           </tr>
@@ -516,20 +515,35 @@ app.get('/', (req: Request, res: Response) => {
         \`).join('');
     }
 
+    function formatMarket(title, slug, txHash) {
+      const displayTitle = title ? (title.length > 50 ? title.substring(0, 50) + '...' : title) : 'Unknown';
+      const polyLink = slug ? \`https://polymarket.com/event/\${slug}\` : null;
+      const txLink = txHash ? \`https://polygonscan.com/tx/\${txHash}\` : null;
+
+      let html = \`<span title="\${title || ''}">\${displayTitle}</span>\`;
+      if (polyLink || txLink) {
+        html += '<br><span style="font-size:11px">';
+        if (polyLink) html += \`<a href="\${polyLink}" target="_blank" style="color:#3b82f6">Market</a>\`;
+        if (polyLink && txLink) html += ' · ';
+        if (txLink) html += \`<a href="\${txLink}" target="_blank" style="color:#888">Tx</a>\`;
+        html += '</span>';
+      }
+      return html;
+    }
+
     async function fetchTrades() {
       const res = await fetch('/api/trades?limit=30');
       const trades = await res.json();
 
       const tbody = document.getElementById('tradesTable');
       tbody.innerHTML = trades.length === 0
-        ? '<tr><td colspan="7" style="text-align:center;color:#666">No trades yet</td></tr>'
+        ? '<tr><td colspan="6" style="text-align:center;color:#666">No trades yet</td></tr>'
         : trades.map(t => \`
           <tr>
-            <td>\${formatDate(t.createdAt)}</td>
+            <td style="white-space:nowrap">\${formatDate(t.createdAt)}</td>
+            <td style="max-width:300px">\${formatMarket(t.marketTitle, t.marketSlug, t.originalTradeId)}</td>
             <td><span class="badge \${t.side.toLowerCase()}">\${t.side}</span></td>
             <td>\${formatMoney(t.originalPrice)}</td>
-            <td>\${t.copySize || '-'}</td>
-            <td>\${formatMoney(t.copyCost)}</td>
             <td><span class="badge \${t.status}">\${t.status}</span></td>
             <td class="truncate" title="\${t.skipReason || ''}" style="max-width:200px;color:#888;font-size:12px">\${t.skipReason || '-'}</td>
           </tr>

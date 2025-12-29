@@ -86,6 +86,8 @@ export interface CopiedTrade {
   skipReason: string | null;
   createdAt: string;
   executedAt: string | null;
+  marketTitle: string | null;
+  marketSlug: string | null;
 }
 
 // Copytrade run record

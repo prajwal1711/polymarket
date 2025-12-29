@@ -473,6 +473,8 @@ export class Copier {
       skipReason: null,
       createdAt: new Date().toISOString(),
       executedAt: null,
+      marketTitle: trade.title || null,
+      marketSlug: trade.slug || null,
     };
   }
 

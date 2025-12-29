@@ -108,12 +108,26 @@ app.get('/api/trades', (req: Request, res: Response) => {
   }
 });
 
-// Get recent runs
+// Get recent runs (with target alias)
 app.get('/api/runs', (req: Request, res: Response) => {
   try {
     const limit = parseInt(req.query.limit as string || '20', 10);
     const runs = storage.getRuns(limit);
-    res.json(runs);
+    const targets = storage.getTargets(false);
+
+    // Create a map of address -> alias for quick lookup
+    const aliasMap = new Map<string, string>();
+    for (const t of targets) {
+      aliasMap.set(t.address.toLowerCase(), t.alias || t.address.substring(0, 10) + '...');
+    }
+
+    // Enrich runs with target alias
+    const enrichedRuns = runs.map(run => ({
+      ...run,
+      targetAlias: aliasMap.get(run.targetAddress.toLowerCase()) || run.targetAddress.substring(0, 10) + '...',
+    }));
+
+    res.json(enrichedRuns);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -1001,7 +1015,7 @@ app.get('/', (req: Request, res: Response) => {
         <thead>
           <tr>
             <th>Time</th>
-            <th>Target</th>
+            <th>From</th>
             <th>Found</th>
             <th>Copied</th>
             <th>Skipped</th>
@@ -1327,7 +1341,7 @@ app.get('/', (req: Request, res: Response) => {
         : runs.map(r => \`
           <tr>
             <td>\${formatDate(r.startedAt)}</td>
-            <td class="address">\${formatAddress(r.targetAddress)}</td>
+            <td style="font-size:12px;color:#fbbf24" title="\${r.targetAddress}">\${r.targetAlias || '-'}</td>
             <td>\${r.tradesFound}</td>
             <td>\${r.tradesCopied}</td>
             <td>\${r.tradesSkipped}</td>

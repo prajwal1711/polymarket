@@ -83,12 +83,26 @@ app.get('/api/positions/closed', (req: Request, res: Response) => {
   }
 });
 
-// Get recent copied trades
+// Get recent copied trades (with target alias)
 app.get('/api/trades', (req: Request, res: Response) => {
   try {
     const limit = parseInt(req.query.limit as string || '50', 10);
     const trades = storage.getCopiedTrades({ limit });
-    res.json(trades);
+    const targets = storage.getTargets(false);
+
+    // Create a map of address -> alias for quick lookup
+    const aliasMap = new Map<string, string>();
+    for (const t of targets) {
+      aliasMap.set(t.address.toLowerCase(), t.alias || t.address.substring(0, 10) + '...');
+    }
+
+    // Enrich trades with target alias
+    const enrichedTrades = trades.map(trade => ({
+      ...trade,
+      targetAlias: aliasMap.get(trade.targetAddress.toLowerCase()) || trade.targetAddress.substring(0, 10) + '...',
+    }));
+
+    res.json(enrichedTrades);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -698,11 +712,19 @@ app.get('/', (req: Request, res: Response) => {
 
   <div class="grid">
     <div class="card">
-      <h2>Exposure</h2>
-      <div class="stat-grid">
+      <h2>Capital</h2>
+      <div class="stat-grid" style="grid-template-columns: repeat(2, 1fr)">
+        <div class="stat">
+          <div class="stat-value positive" id="allocatableCapital">$0</div>
+          <div class="stat-label">Allocatable</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" id="lockedInWallets">$0</div>
+          <div class="stat-label">Locked in Wallets</div>
+        </div>
         <div class="stat">
           <div class="stat-value" id="totalExposure">$0</div>
-          <div class="stat-label">Total Invested</div>
+          <div class="stat-label">In Positions</div>
         </div>
         <div class="stat">
           <div class="stat-value" id="openPositions">0</div>
@@ -851,13 +873,13 @@ app.get('/', (req: Request, res: Response) => {
         <thead>
           <tr>
             <th>Time</th>
+            <th>From</th>
             <th>Market</th>
             <th>Side</th>
             <th>Price</th>
             <th>Shares</th>
-            <th>Total Cost</th>
+            <th>Cost</th>
             <th>Status</th>
-            <th>Reason</th>
           </tr>
         </thead>
         <tbody id="tradesTable"></tbody>
@@ -1023,9 +1045,16 @@ app.get('/', (req: Request, res: Response) => {
     }
 
     async function fetchSummary() {
-      const res = await fetch('/api/summary');
-      const data = await res.json();
+      const [summaryRes, operatingRes] = await Promise.all([
+        fetch('/api/summary'),
+        fetch('/api/operating')
+      ]);
+      const data = await summaryRes.json();
+      const operating = await operatingRes.json();
 
+      // Capital section
+      document.getElementById('allocatableCapital').textContent = formatMoney(operating.availableBalance);
+      document.getElementById('lockedInWallets').textContent = formatMoney(operating.totalAllocatedToWallets);
       document.getElementById('totalExposure').textContent = formatMoney(data.positions.totalInvested);
       document.getElementById('openPositions').textContent = data.positions.open;
 
@@ -1088,13 +1117,13 @@ app.get('/', (req: Request, res: Response) => {
         : trades.map(t => \`
           <tr class="clickable" onclick="showTradeModal('\${t.id}')" title="Click to see guardrail details">
             <td style="white-space:nowrap">\${formatDate(t.createdAt)}</td>
-            <td style="max-width:300px">\${formatMarket(t.marketTitle, t.marketSlug, t.originalTradeId)}</td>
+            <td style="font-size:12px;color:#fbbf24" title="\${t.targetAddress}">\${t.targetAlias || '-'}</td>
+            <td style="max-width:250px">\${formatMarket(t.marketTitle, t.marketSlug, t.originalTradeId)}</td>
             <td><span class="badge \${t.side.toLowerCase()}">\${t.side}</span></td>
             <td>\${formatMoney(t.copyPrice || t.originalPrice)}</td>
             <td>\${t.copySize ? t.copySize.toFixed(0) : '-'}</td>
             <td style="font-weight:bold">\${t.copyCost ? formatMoney(t.copyCost) : '-'}</td>
-            <td><span class="badge \${t.status}">\${t.status}</span></td>
-            <td class="truncate" title="\${t.skipReason || ''}" style="max-width:200px;color:#888;font-size:12px">\${t.skipReason || '-'}</td>
+            <td><span class="badge \${t.status}" title="\${t.skipReason || ''}">\${t.status}</span></td>
           </tr>
         \`).join('');
     }

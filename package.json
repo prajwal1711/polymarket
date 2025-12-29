@@ -28,7 +28,10 @@
     "copytrade:targets": "ts-node src/copytrade/index.ts -- --list-targets",
     "copytrade:daemon": "ts-node src/copytrade/daemon.ts",
     "copytrade:daemon:dry": "ts-node src/copytrade/daemon.ts -- --dry-run",
-    "copytrade:dashboard": "ts-node src/copytrade/dashboard.ts"
+    "copytrade:dashboard": "ts-node src/copytrade/dashboard.ts",
+    "deploy": "./deploy.sh",
+    "deploy:restart": "./deploy.sh --restart",
+    "backup": "ssh -i ~/.ssh/copytrade-key.pem ubuntu@13.49.224.112 'cd ~/polymarket/data && cp copytrade.db copytrade.db.backup.$(date +%Y%m%d_%H%M%S)'"
   },
   "keywords": [],
   "author": "",
@@ -36,9 +39,11 @@
   "dependencies": {
     "@ethersproject/wallet": "^5.7.0",
     "@polymarket/clob-client": "^5.1.3",
+    "@types/cookie-parser": "^1.4.10",
     "@types/express": "^5.0.6",
     "axios": "^1.13.2",
     "better-sqlite3": "^12.5.0",
+    "cookie-parser": "^1.4.7",
     "dotenv": "^16.4.5",
     "express": "^5.2.1",
     "p-limit": "^7.2.0",

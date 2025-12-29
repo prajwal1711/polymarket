@@ -9,18 +9,233 @@
 import * as dotenv from 'dotenv';
 dotenv.config();
 
-import express, { Request, Response } from 'express';
+import express, { Request, Response, NextFunction } from 'express';
+import cookieParser from 'cookie-parser';
+import crypto from 'crypto';
 import { CopytradeStorage } from './storage';
 import { PolymarketDataApi } from './data-api';
 
 const PORT = parseInt(process.env.COPYTRADE_DASHBOARD_PORT || '3457', 10);
+const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || 'admin';
+
+// Generate a session secret for signing cookies
+const SESSION_SECRET = crypto.randomBytes(32).toString('hex');
+
+// Simple session store (in-memory, resets on restart)
+const sessions = new Set<string>();
+
+function generateSessionToken(): string {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+function isAuthenticated(req: Request): boolean {
+  const token = req.cookies?.session;
+  return token && sessions.has(token);
+}
+
+// Auth middleware - allows /login and /api/login through
+function authMiddleware(req: Request, res: Response, next: NextFunction) {
+  // Allow login page and login API
+  if (req.path === '/login' || req.path === '/api/login') {
+    return next();
+  }
+
+  if (!isAuthenticated(req)) {
+    // For API calls, return 401
+    if (req.path.startsWith('/api/')) {
+      return res.status(401).json({ error: 'Not authenticated' });
+    }
+    // For page requests, redirect to login
+    return res.redirect('/login');
+  }
+
+  next();
+}
 
 const app = express();
 app.use(express.json());
+app.use(cookieParser());
 
 // Initialize storage
 const storage = new CopytradeStorage();
 const dataApi = new PolymarketDataApi();
+
+// Apply auth middleware to all routes
+app.use(authMiddleware);
+
+// ============ Auth Endpoints ============
+
+// Login page
+app.get('/login', (req: Request, res: Response) => {
+  // If already logged in, redirect to dashboard
+  if (isAuthenticated(req)) {
+    return res.redirect('/');
+  }
+
+  res.send(`
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Login - Copytrade Dashboard</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0a0a0a;
+      color: #e0e0e0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .login-box {
+      background: #1a1a1a;
+      border: 1px solid #333;
+      border-radius: 12px;
+      padding: 40px;
+      width: 100%;
+      max-width: 400px;
+    }
+    h1 {
+      color: #fff;
+      font-size: 24px;
+      margin-bottom: 8px;
+      text-align: center;
+    }
+    .subtitle {
+      color: #888;
+      font-size: 14px;
+      text-align: center;
+      margin-bottom: 30px;
+    }
+    .form-group {
+      margin-bottom: 20px;
+    }
+    label {
+      display: block;
+      color: #888;
+      font-size: 12px;
+      margin-bottom: 8px;
+      text-transform: uppercase;
+    }
+    input[type="password"] {
+      width: 100%;
+      background: #222;
+      border: 1px solid #444;
+      color: #fff;
+      padding: 14px;
+      border-radius: 6px;
+      font-size: 16px;
+    }
+    input[type="password"]:focus {
+      outline: none;
+      border-color: #666;
+    }
+    button {
+      width: 100%;
+      background: #22c55e;
+      color: #fff;
+      border: none;
+      padding: 14px;
+      border-radius: 6px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    button:hover {
+      background: #16a34a;
+    }
+    .error {
+      background: #7f1d1d;
+      color: #fca5a5;
+      padding: 12px;
+      border-radius: 6px;
+      margin-bottom: 20px;
+      font-size: 14px;
+      display: none;
+    }
+    .error.show {
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <div class="login-box">
+    <h1>Copytrade Dashboard</h1>
+    <p class="subtitle">Enter password to continue</p>
+    <div class="error" id="error">Invalid password</div>
+    <form id="loginForm">
+      <div class="form-group">
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" placeholder="Enter password" autofocus required>
+      </div>
+      <button type="submit">Login</button>
+    </form>
+  </div>
+  <script>
+    document.getElementById('loginForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const password = document.getElementById('password').value;
+      const errorEl = document.getElementById('error');
+
+      try {
+        const res = await fetch('/api/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password })
+        });
+
+        if (res.ok) {
+          window.location.href = '/';
+        } else {
+          errorEl.classList.add('show');
+          document.getElementById('password').value = '';
+          document.getElementById('password').focus();
+        }
+      } catch (err) {
+        errorEl.classList.add('show');
+      }
+    });
+  </script>
+</body>
+</html>
+  `);
+});
+
+// Login API
+app.post('/api/login', (req: Request, res: Response) => {
+  const { password } = req.body;
+
+  if (password === DASHBOARD_PASSWORD) {
+    const token = generateSessionToken();
+    sessions.add(token);
+
+    // Set cookie (httpOnly for security, 7 day expiry)
+    res.cookie('session', token, {
+      httpOnly: true,
+      secure: false, // Set to true if using HTTPS
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+      sameSite: 'strict',
+    });
+
+    res.json({ success: true });
+  } else {
+    res.status(401).json({ error: 'Invalid password' });
+  }
+});
+
+// Logout API
+app.post('/api/logout', (req: Request, res: Response) => {
+  const token = req.cookies?.session;
+  if (token) {
+    sessions.delete(token);
+  }
+  res.clearCookie('session');
+  res.json({ success: true });
+});
 
 // ============ API Endpoints ============
 
@@ -754,6 +969,7 @@ app.get('/', (req: Request, res: Response) => {
       <button class="btn" onclick="showGlobalSettingsModal()" style="background:#4a4a00">Global Settings</button>
       <button class="btn success" id="resumeAllBtn" onclick="resumeAll()">Resume All</button>
       <button class="btn danger" id="pauseAllBtn" onclick="pauseAll()">Pause All</button>
+      <button class="btn" onclick="logout()" style="background:#333;margin-left:20px">Logout</button>
     </div>
   </div>
 
@@ -1412,6 +1628,15 @@ app.get('/', (req: Request, res: Response) => {
         fetchRuns(),
       ]);
       document.getElementById('lastUpdate').textContent = 'Updated: ' + new Date().toLocaleTimeString();
+    }
+
+    async function logout() {
+      try {
+        await fetch('/api/logout', { method: 'POST' });
+        window.location.href = '/login';
+      } catch (e) {
+        window.location.href = '/login';
+      }
     }
 
     // Initial load

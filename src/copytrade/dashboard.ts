@@ -197,6 +197,261 @@ app.get('/api/targets/:address/trades', async (req: Request, res: Response) => {
   }
 });
 
+// ============ Subledger API Endpoints ============
+
+// Get all wallet stats
+app.get('/api/wallets/stats', (req: Request, res: Response) => {
+  try {
+    const stats = storage.getAllWalletStats();
+    res.json(stats);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get single wallet stats
+app.get('/api/wallets/:address/stats', (req: Request, res: Response) => {
+  try {
+    const { address } = req.params;
+    const stats = storage.getWalletStats(address);
+    if (!stats) {
+      return res.status(404).json({ error: 'Wallet not found' });
+    }
+    res.json(stats);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Deposit to wallet
+app.post('/api/wallets/:address/deposit', (req: Request, res: Response) => {
+  try {
+    const { address } = req.params;
+    const { amount, note } = req.body;
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ error: 'Amount must be positive' });
+    }
+    const tx = storage.depositToWallet(address, amount, note);
+    res.json({ success: true, transaction: tx });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Withdraw from wallet
+app.post('/api/wallets/:address/withdraw', (req: Request, res: Response) => {
+  try {
+    const { address } = req.params;
+    const { amount, note } = req.body;
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ error: 'Amount must be positive' });
+    }
+    const tx = storage.withdrawFromWallet(address, amount, note);
+    res.json({ success: true, transaction: tx });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get wallet transactions
+app.get('/api/wallets/:address/transactions', (req: Request, res: Response) => {
+  try {
+    const { address } = req.params;
+    const limit = parseInt(req.query.limit as string || '50', 10);
+    const txs = storage.getWalletTransactions(address, limit);
+    res.json(txs);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get full wallet config
+app.get('/api/wallets/:address/config', (req: Request, res: Response) => {
+  try {
+    const { address } = req.params;
+    const target = storage.getTarget(address);
+    if (!target) {
+      return res.status(404).json({ error: 'Wallet not found' });
+    }
+    res.json({
+      address: target.address,
+      alias: target.alias,
+      maxCostPerTrade: target.maxCostPerTrade,
+      maxExposure: target.maxExposure,
+      sizingMode: target.sizingMode,
+      fixedDollarAmount: target.fixedDollarAmount,
+      minPrice: target.minPrice,
+      maxPrice: target.maxPrice,
+      allowOverdraft: target.allowOverdraft,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update wallet config
+app.patch('/api/wallets/:address/config', (req: Request, res: Response) => {
+  try {
+    const { address } = req.params;
+    const config = req.body;
+    storage.updateTargetConfig(address, config);
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============ Operating Account API ============
+
+// Get operating account
+app.get('/api/operating', (req: Request, res: Response) => {
+  try {
+    const account = storage.getOperatingAccount();
+    res.json(account);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Deposit to operating account
+app.post('/api/operating/deposit', (req: Request, res: Response) => {
+  try {
+    const { amount } = req.body;
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ error: 'Amount must be positive' });
+    }
+    storage.depositToOperating(amount);
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Withdraw from operating account
+app.post('/api/operating/withdraw', (req: Request, res: Response) => {
+  try {
+    const { amount } = req.body;
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ error: 'Amount must be positive' });
+    }
+    storage.withdrawFromOperating(amount);
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============ Reconciliation API ============
+
+// Get our Polymarket wallet state (USDC + positions)
+app.get('/api/polymarket/balance', async (req: Request, res: Response) => {
+  try {
+    const walletAddress = process.env.FUNDER_ADDRESS;
+    if (!walletAddress) {
+      return res.status(400).json({ error: 'FUNDER_ADDRESS not configured' });
+    }
+
+    const state = await dataApi.getWalletState(walletAddress);
+    res.json({
+      wallet: walletAddress,
+      usdcBalance: state.usdcBalance,
+      positionValue: state.totalPositionValue,
+      totalEquity: state.totalEquity,
+      positionCount: state.positions.length,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Full reconciliation - compare our tracking vs Polymarket reality
+app.get('/api/reconcile', async (req: Request, res: Response) => {
+  try {
+    const walletAddress = process.env.FUNDER_ADDRESS;
+    if (!walletAddress) {
+      return res.status(400).json({ error: 'FUNDER_ADDRESS not configured' });
+    }
+
+    // Get actual Polymarket state
+    const polymarket = await dataApi.getWalletState(walletAddress);
+
+    // Get our internal tracking
+    const operating = storage.getOperatingAccount();
+    const walletStats = storage.getAllWalletStats();
+
+    // Calculate our totals
+    const ourTotalDeposited = operating.totalDeposited;
+    const ourTotalExposure = walletStats.reduce((sum, w) => sum + w.currentExposure, 0);
+    const ourRealizedPnl = walletStats.reduce((sum, w) => sum + w.realizedPnl, 0);
+    const ourAvailable = walletStats.reduce((sum, w) => sum + w.availableBalance, 0) + operating.availableBalance;
+
+    // Build position comparison
+    const ourPositions = storage.getOpenPositions(); // Get all open positions
+    const polymarketPositionsByToken = new Map<string, { size: number; value: number }>();
+
+    for (const pos of polymarket.positions) {
+      if (pos.size > 0) {
+        polymarketPositionsByToken.set(pos.asset, { size: pos.size, value: pos.size * pos.curPrice });
+      }
+    }
+
+    const positionDiffs: any[] = [];
+    const trackedTokens = new Set<string>();
+
+    for (const ourPos of ourPositions) {
+      trackedTokens.add(ourPos.tokenId);
+      const pmPos = polymarketPositionsByToken.get(ourPos.tokenId);
+
+      positionDiffs.push({
+        tokenId: ourPos.tokenId.substring(0, 20) + '...',
+        ourShares: ourPos.shares,
+        pmShares: pmPos?.size || 0,
+        diff: (pmPos?.size || 0) - ourPos.shares,
+        match: Math.abs((pmPos?.size || 0) - ourPos.shares) < 0.01,
+      });
+    }
+
+    // Check for positions on Polymarket we don't track
+    for (const [tokenId, pmPos] of polymarketPositionsByToken) {
+      if (!trackedTokens.has(tokenId)) {
+        positionDiffs.push({
+          tokenId: tokenId.substring(0, 20) + '...',
+          ourShares: 0,
+          pmShares: pmPos.size,
+          diff: pmPos.size,
+          match: false,
+          untracked: true,
+        });
+      }
+    }
+
+    res.json({
+      timestamp: new Date().toISOString(),
+      polymarket: {
+        wallet: walletAddress,
+        usdcBalance: polymarket.usdcBalance,
+        positionValue: polymarket.totalPositionValue,
+        totalEquity: polymarket.totalEquity,
+        positionCount: polymarket.positions.length,
+      },
+      ourTracking: {
+        totalDeposited: ourTotalDeposited,
+        totalExposure: ourTotalExposure,
+        realizedPnl: ourRealizedPnl,
+        availableBalance: ourAvailable,
+        trackedPositions: ourPositions.length,
+      },
+      comparison: {
+        equityMatch: Math.abs(polymarket.totalEquity - (ourTotalDeposited + ourRealizedPnl)) < 1,
+        exposureMatch: Math.abs(polymarket.totalPositionValue - ourTotalExposure) < 1,
+        positionDiffs,
+      },
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ============ Dashboard HTML ============
 
 app.get('/', (req: Request, res: Response) => {
@@ -281,6 +536,113 @@ app.get('/', (req: Request, res: Response) => {
 
     .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
     .last-update { color: #666; font-size: 12px; }
+
+    /* Modal styles */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0,0,0,0.8);
+      z-index: 1000;
+      justify-content: center;
+      align-items: center;
+    }
+    .modal-overlay.active { display: flex; }
+    .modal {
+      background: #1a1a1a;
+      border: 1px solid #333;
+      border-radius: 8px;
+      max-width: 700px;
+      width: 90%;
+      max-height: 85vh;
+      overflow-y: auto;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+    }
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 15px 20px;
+      border-bottom: 1px solid #333;
+      position: sticky;
+      top: 0;
+      background: #1a1a1a;
+    }
+    .modal-header h3 { margin: 0; color: #fff; font-size: 16px; }
+    .modal-close {
+      background: none;
+      border: none;
+      color: #888;
+      font-size: 24px;
+      cursor: pointer;
+      padding: 0;
+      line-height: 1;
+    }
+    .modal-close:hover { color: #fff; }
+    .modal-body { padding: 20px; }
+
+    .rule-item {
+      display: flex;
+      align-items: flex-start;
+      padding: 12px;
+      border-radius: 6px;
+      margin-bottom: 8px;
+      background: #222;
+    }
+    .rule-item.passed { border-left: 3px solid #22c55e; }
+    .rule-item.failed { border-left: 3px solid #ef4444; }
+    .rule-icon {
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      margin-right: 12px;
+      flex-shrink: 0;
+    }
+    .rule-icon.passed { background: #22c55e33; color: #22c55e; }
+    .rule-icon.failed { background: #ef444433; color: #ef4444; }
+    .rule-content { flex: 1; }
+    .rule-name { font-weight: 600; color: #fff; margin-bottom: 4px; }
+    .rule-details { font-size: 12px; color: #888; }
+    .rule-math {
+      font-family: monospace;
+      font-size: 11px;
+      color: #666;
+      background: #1a1a1a;
+      padding: 4px 8px;
+      border-radius: 4px;
+      margin-top: 6px;
+    }
+
+    .sizing-box {
+      background: #222;
+      border-radius: 6px;
+      padding: 15px;
+      margin-top: 15px;
+    }
+    .sizing-box h4 {
+      margin: 0 0 10px 0;
+      color: #888;
+      font-size: 12px;
+      text-transform: uppercase;
+    }
+    .sizing-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 4px 0;
+      font-size: 13px;
+    }
+    .sizing-row .label { color: #888; }
+    .sizing-row .value { color: #fff; font-family: monospace; }
+
+    tr.clickable { cursor: pointer; }
+    tr.clickable:hover { background: #333 !important; }
 
     .tabs { display: flex; gap: 10px; margin-bottom: 20px; }
     .tab {
@@ -370,8 +732,36 @@ app.get('/', (req: Request, res: Response) => {
   <div class="tabs">
     <div class="tab active" onclick="showSection('positions')">Positions</div>
     <div class="tab" onclick="showSection('trades')">Recent Trades</div>
-    <div class="tab" onclick="showSection('targets')">Targets</div>
+    <div class="tab" onclick="showSection('wallets')">Wallets</div>
+    <div class="tab" onclick="showSection('reconcile')">Reconcile</div>
     <div class="tab" onclick="showSection('runs')">Run History</div>
+  </div>
+
+  <!-- Operating Account Card -->
+  <div class="card" style="margin-bottom:20px;background:#1a2a1a;border-color:#2d4a2d">
+    <h2 style="color:#4ade80">Operating Account</h2>
+    <div class="stat-grid" style="grid-template-columns: repeat(4, 1fr)">
+      <div class="stat">
+        <div class="stat-value" id="opDeposited">$0</div>
+        <div class="stat-label">Total Deposited</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="opWithdrawn">$0</div>
+        <div class="stat-label">Withdrawn</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="opAllocated">$0</div>
+        <div class="stat-label">Allocated to Wallets</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value positive" id="opAvailable">$0</div>
+        <div class="stat-label">Available</div>
+      </div>
+    </div>
+    <div style="margin-top:15px;text-align:right">
+      <button class="btn success" onclick="showFundingModal('operating', 'deposit')">Deposit</button>
+      <button class="btn danger" onclick="showFundingModal('operating', 'withdraw')">Withdraw</button>
+    </div>
   </div>
 
   <div id="positions" class="section active">
@@ -402,6 +792,8 @@ app.get('/', (req: Request, res: Response) => {
             <th>Market</th>
             <th>Side</th>
             <th>Price</th>
+            <th>Shares</th>
+            <th>Total Cost</th>
             <th>Status</th>
             <th>Reason</th>
           </tr>
@@ -411,26 +803,110 @@ app.get('/', (req: Request, res: Response) => {
     </div>
   </div>
 
-  <div id="targets" class="section">
+  <div id="wallets" class="section">
     <div class="card">
-      <h2>Target Wallets</h2>
+      <h2>Wallet Subledgers</h2>
       <table>
         <thead>
           <tr>
-            <th>Address</th>
-            <th>Alias</th>
+            <th>Wallet</th>
+            <th>Deposited</th>
             <th>Exposure</th>
+            <th>P&L</th>
+            <th>Available</th>
+            <th>Return</th>
             <th>Status</th>
             <th>Actions</th>
           </tr>
         </thead>
-        <tbody id="targetsTable"></tbody>
+        <tbody id="walletsTable"></tbody>
       </table>
       <div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid #333;">
         <input type="text" id="newTargetAddress" placeholder="0x... wallet address" style="background:#222;border:1px solid #444;color:#fff;padding:8px;border-radius:4px;width:350px;font-family:monospace;">
         <input type="text" id="newTargetAlias" placeholder="Alias (optional)" style="background:#222;border:1px solid #444;color:#fff;padding:8px;border-radius:4px;width:150px;margin-left:8px;">
-        <button class="btn success" onclick="addTarget()">Add Target</button>
+        <button class="btn success" onclick="addTarget()">Add Wallet</button>
       </div>
+    </div>
+  </div>
+
+  <div id="reconcile" class="section">
+    <div class="card" style="margin-bottom:20px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:15px">
+        <h2>Polymarket vs Our Tracking</h2>
+        <button class="btn" onclick="fetchReconciliation()">Refresh</button>
+      </div>
+
+      <div class="stat-grid" style="grid-template-columns: repeat(2, 1fr); gap: 20px">
+        <!-- Polymarket Reality -->
+        <div style="background:#1a1a2a;border:1px solid #2d2d4a;border-radius:8px;padding:15px">
+          <h3 style="color:#818cf8;margin:0 0 15px 0;font-size:14px">POLYMARKET (Actual)</h3>
+          <div class="stat-grid" style="grid-template-columns: repeat(2, 1fr)">
+            <div class="stat">
+              <div class="stat-value" id="pmUsdcBalance">-</div>
+              <div class="stat-label">USDC Balance</div>
+            </div>
+            <div class="stat">
+              <div class="stat-value" id="pmPositionValue">-</div>
+              <div class="stat-label">Position Value</div>
+            </div>
+            <div class="stat">
+              <div class="stat-value" id="pmTotalEquity">-</div>
+              <div class="stat-label">Total Equity</div>
+            </div>
+            <div class="stat">
+              <div class="stat-value" id="pmPositionCount">-</div>
+              <div class="stat-label">Positions</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Our Tracking -->
+        <div style="background:#1a2a1a;border:1px solid #2d4a2d;border-radius:8px;padding:15px">
+          <h3 style="color:#4ade80;margin:0 0 15px 0;font-size:14px">OUR TRACKING (Subledger)</h3>
+          <div class="stat-grid" style="grid-template-columns: repeat(2, 1fr)">
+            <div class="stat">
+              <div class="stat-value" id="ourDeposited">-</div>
+              <div class="stat-label">Total Deposited</div>
+            </div>
+            <div class="stat">
+              <div class="stat-value" id="ourExposure">-</div>
+              <div class="stat-label">Current Exposure</div>
+            </div>
+            <div class="stat">
+              <div class="stat-value" id="ourPnl">-</div>
+              <div class="stat-label">Realized P&L</div>
+            </div>
+            <div class="stat">
+              <div class="stat-value" id="ourPositions">-</div>
+              <div class="stat-label">Tracked Positions</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Match Status -->
+      <div id="reconcileStatus" style="margin-top:15px;padding:15px;border-radius:8px;background:#222;text-align:center">
+        <span style="color:#888">Click Refresh to load reconciliation data</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Position Differences</h2>
+      <p style="color:#888;font-size:12px;margin-bottom:15px">Compares positions we track vs actual positions on Polymarket</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Token ID</th>
+            <th>Our Shares</th>
+            <th>PM Shares</th>
+            <th>Difference</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="reconcileTable">
+          <tr><td colspan="5" style="text-align:center;color:#666">No data loaded</td></tr>
+        </tbody>
+      </table>
     </div>
   </div>
 
@@ -455,6 +931,12 @@ app.get('/', (req: Request, res: Response) => {
   </div>
 
   <script>
+    // Global variables - must be declared at top to avoid hoisting issues
+    let allTrades = [];
+    let currentFundingTarget = null;
+    let currentFundingType = null;
+    let currentSettingsAddress = null;
+
     function showSection(name) {
       document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
       document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -535,43 +1017,153 @@ app.get('/', (req: Request, res: Response) => {
       const res = await fetch('/api/trades?limit=30');
       const trades = await res.json();
 
+      // Store for modal access
+      allTrades = trades;
+
       const tbody = document.getElementById('tradesTable');
       tbody.innerHTML = trades.length === 0
-        ? '<tr><td colspan="6" style="text-align:center;color:#666">No trades yet</td></tr>'
+        ? '<tr><td colspan="8" style="text-align:center;color:#666">No trades yet</td></tr>'
         : trades.map(t => \`
-          <tr>
+          <tr class="clickable" onclick="showTradeModal('\${t.id}')" title="Click to see guardrail details">
             <td style="white-space:nowrap">\${formatDate(t.createdAt)}</td>
             <td style="max-width:300px">\${formatMarket(t.marketTitle, t.marketSlug, t.originalTradeId)}</td>
             <td><span class="badge \${t.side.toLowerCase()}">\${t.side}</span></td>
-            <td>\${formatMoney(t.originalPrice)}</td>
+            <td>\${formatMoney(t.copyPrice || t.originalPrice)}</td>
+            <td>\${t.copySize ? t.copySize.toFixed(0) : '-'}</td>
+            <td style="font-weight:bold">\${t.copyCost ? formatMoney(t.copyCost) : '-'}</td>
             <td><span class="badge \${t.status}">\${t.status}</span></td>
             <td class="truncate" title="\${t.skipReason || ''}" style="max-width:200px;color:#888;font-size:12px">\${t.skipReason || '-'}</td>
           </tr>
         \`).join('');
     }
 
-    async function fetchTargets() {
-      const res = await fetch('/api/targets');
-      const targets = await res.json();
+    async function fetchWallets() {
+      const res = await fetch('/api/wallets/stats');
+      const wallets = await res.json();
 
-      const tbody = document.getElementById('targetsTable');
-      tbody.innerHTML = targets.length === 0
-        ? '<tr><td colspan="5" style="text-align:center;color:#666">No targets configured</td></tr>'
-        : targets.map(t => \`
+      const tbody = document.getElementById('walletsTable');
+      tbody.innerHTML = wallets.length === 0
+        ? '<tr><td colspan="8" style="text-align:center;color:#666">No wallets configured</td></tr>'
+        : wallets.map(w => {
+            const returnClass = w.returnPercent >= 0 ? 'positive' : 'negative';
+            const returnSign = w.returnPercent >= 0 ? '+' : '';
+            const pnlClass = w.realizedPnl >= 0 ? 'positive' : 'negative';
+            const pnlSign = w.realizedPnl >= 0 ? '+' : '';
+            return \`
           <tr>
-            <td class="address" title="\${t.address}">\${formatAddress(t.address)}</td>
-            <td>\${t.alias || '-'}</td>
-            <td>\${formatMoney(t.exposure)} / $50</td>
-            <td><span class="badge \${t.enabled ? 'enabled' : 'disabled'}">\${t.enabled ? 'Enabled' : 'Disabled'}</span></td>
             <td>
-              \${t.enabled
-                ? \`<button class="btn small danger" onclick="toggleTarget('\${t.address}', false)">Pause</button>\`
-                : \`<button class="btn small success" onclick="toggleTarget('\${t.address}', true)">Resume</button>\`
+              <div class="address" title="\${w.address}">\${formatAddress(w.address)}</div>
+              <div style="font-size:11px;color:#888">\${w.alias || ''}</div>
+            </td>
+            <td>\${formatMoney(w.totalDeposited)}</td>
+            <td>\${formatMoney(w.currentExposure)}</td>
+            <td class="\${pnlClass}">\${pnlSign}\${formatMoney(w.realizedPnl)}</td>
+            <td style="font-weight:bold">\${formatMoney(w.availableBalance)}</td>
+            <td class="\${returnClass}">\${returnSign}\${w.returnPercent.toFixed(1)}%</td>
+            <td><span class="badge \${w.enabled ? 'enabled' : 'disabled'}">\${w.enabled ? 'Active' : 'Paused'}</span></td>
+            <td>
+              <button class="btn small" onclick="showSettingsModal('\${w.address}')" title="Settings">⚙</button>
+              <button class="btn small success" onclick="showFundingModal('\${w.address}', 'deposit')" title="Deposit">+$</button>
+              <button class="btn small" onclick="showFundingModal('\${w.address}', 'withdraw')" title="Withdraw">-$</button>
+              \${w.enabled
+                ? \`<button class="btn small danger" onclick="toggleTarget('\${w.address}', false)">Pause</button>\`
+                : \`<button class="btn small success" onclick="toggleTarget('\${w.address}', true)">Resume</button>\`
               }
-              <button class="btn small" onclick="removeTarget('\${t.address}')" title="Remove target">X</button>
+              <button class="btn small" onclick="removeTarget('\${w.address}')" title="Remove">X</button>
             </td>
           </tr>
-        \`).join('');
+        \`}).join('');
+    }
+
+    async function fetchOperatingAccount() {
+      const res = await fetch('/api/operating');
+      const op = await res.json();
+
+      document.getElementById('opDeposited').textContent = formatMoney(op.totalDeposited);
+      document.getElementById('opWithdrawn').textContent = formatMoney(op.totalWithdrawn);
+      document.getElementById('opAllocated').textContent = formatMoney(op.totalAllocatedToWallets);
+      document.getElementById('opAvailable').textContent = formatMoney(op.availableBalance);
+    }
+
+    async function fetchReconciliation() {
+      try {
+        document.getElementById('reconcileStatus').innerHTML = '<span style="color:#888">Loading...</span>';
+
+        const res = await fetch('/api/reconcile');
+        const data = await res.json();
+
+        if (data.error) {
+          document.getElementById('reconcileStatus').innerHTML = '<span style="color:#ef4444">Error: ' + data.error + '</span>';
+          return;
+        }
+
+        // Update Polymarket stats
+        document.getElementById('pmUsdcBalance').textContent = formatMoney(data.polymarket.usdcBalance);
+        document.getElementById('pmPositionValue').textContent = formatMoney(data.polymarket.positionValue);
+        document.getElementById('pmTotalEquity').textContent = formatMoney(data.polymarket.totalEquity);
+        document.getElementById('pmPositionCount').textContent = data.polymarket.positionCount;
+
+        // Update Our Tracking stats
+        document.getElementById('ourDeposited').textContent = formatMoney(data.ourTracking.totalDeposited);
+        document.getElementById('ourExposure').textContent = formatMoney(data.ourTracking.totalExposure);
+        document.getElementById('ourPnl').textContent = formatMoney(data.ourTracking.realizedPnl);
+        document.getElementById('ourPositions').textContent = data.ourTracking.trackedPositions;
+
+        // Update status
+        const equityDiff = Math.abs(data.polymarket.totalEquity - (data.ourTracking.totalDeposited + data.ourTracking.realizedPnl));
+        const exposureDiff = Math.abs(data.polymarket.positionValue - data.ourTracking.totalExposure);
+
+        let statusHtml = '';
+        if (data.comparison.equityMatch && data.comparison.exposureMatch) {
+          statusHtml = '<span style="color:#4ade80;font-weight:bold">IN SYNC</span>';
+        } else {
+          statusHtml = '<span style="color:#f59e0b;font-weight:bold">OUT OF SYNC</span>';
+          statusHtml += '<div style="margin-top:8px;font-size:12px;color:#888">';
+          if (!data.comparison.equityMatch) {
+            statusHtml += 'Equity diff: $' + equityDiff.toFixed(2) + '<br>';
+          }
+          if (!data.comparison.exposureMatch) {
+            statusHtml += 'Exposure diff: $' + exposureDiff.toFixed(2);
+          }
+          statusHtml += '</div>';
+        }
+        document.getElementById('reconcileStatus').innerHTML = statusHtml;
+
+        // Update position diffs table
+        const tbody = document.getElementById('reconcileTable');
+        if (data.comparison.positionDiffs.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#666">No positions to compare</td></tr>';
+        } else {
+          tbody.innerHTML = data.comparison.positionDiffs.map(p => {
+            let statusBadge = '';
+            if (p.match) {
+              statusBadge = '<span class="badge enabled">Match</span>';
+            } else if (p.untracked) {
+              statusBadge = '<span class="badge" style="background:#1a1a2a;color:#818cf8">Untracked</span>';
+            } else if (p.ourShares > 0 && p.pmShares === 0) {
+              statusBadge = '<span class="badge danger">Missing on PM</span>';
+            } else {
+              statusBadge = '<span class="badge" style="background:#451a03;color:#f59e0b">Mismatch</span>';
+            }
+
+            const diffClass = p.diff > 0 ? 'positive' : (p.diff < 0 ? 'negative' : '');
+            const diffSign = p.diff > 0 ? '+' : '';
+
+            return \`
+              <tr>
+                <td style="font-family:monospace;font-size:11px">\${p.tokenId}</td>
+                <td>\${p.ourShares.toFixed(2)}</td>
+                <td>\${p.pmShares.toFixed(2)}</td>
+                <td class="\${diffClass}">\${diffSign}\${p.diff.toFixed(2)}</td>
+                <td>\${statusBadge}</td>
+              </tr>
+            \`;
+          }).join('');
+        }
+
+      } catch (e) {
+        document.getElementById('reconcileStatus').innerHTML = '<span style="color:#ef4444">Error: ' + e.message + '</span>';
+      }
     }
 
     async function toggleTarget(address, enabled) {
@@ -660,7 +1252,8 @@ app.get('/', (req: Request, res: Response) => {
         fetchSummary(),
         fetchPositions(),
         fetchTrades(),
-        fetchTargets(),
+        fetchWallets(),
+        fetchOperatingAccount(),
         fetchRuns(),
       ]);
       document.getElementById('lastUpdate').textContent = 'Updated: ' + new Date().toLocaleTimeString();
@@ -671,7 +1264,341 @@ app.get('/', (req: Request, res: Response) => {
 
     // Auto-refresh every 30 seconds
     setInterval(refreshAll, 30000);
+
+    // ============ Modal Functions ============
+
+    function showTradeModal(tradeId) {
+      const trade = allTrades.find(t => t.id === tradeId);
+      if (!trade) return;
+
+      const modal = document.getElementById('tradeModal');
+      const content = document.getElementById('modalContent');
+
+      // Build modal content
+      let html = '<div class="modal-header">';
+      html += '<h3>Guardrail Evaluation</h3>';
+      html += '<button class="modal-close" onclick="closeModal()">&times;</button>';
+      html += '</div>';
+      html += '<div class="modal-body">';
+
+      // Trade summary
+      html += '<div style="margin-bottom:15px;padding:10px;background:#222;border-radius:6px">';
+      html += '<div style="font-weight:600;color:#fff;margin-bottom:5px">' + (trade.marketTitle || 'Unknown Market').substring(0, 60) + '</div>';
+      html += '<div style="font-size:12px;color:#888">';
+      html += '<span class="badge ' + trade.side.toLowerCase() + '">' + trade.side + '</span> ';
+      html += 'at $' + (trade.copyPrice || trade.originalPrice).toFixed(4) + ' ';
+      html += '• <span class="badge ' + trade.status + '">' + trade.status.toUpperCase() + '</span>';
+      html += '</div>';
+      html += '</div>';
+
+      // Check if we have rule evaluation
+      const eval_ = trade.ruleEvaluation;
+      if (!eval_ || !eval_.rules || eval_.rules.length === 0) {
+        html += '<div style="text-align:center;color:#666;padding:20px">No rule evaluation data available for this trade</div>';
+      } else {
+        // Rules breakdown
+        html += '<h4 style="color:#888;font-size:12px;text-transform:uppercase;margin-bottom:10px">Rules Checked</h4>';
+
+        for (const rule of eval_.rules) {
+          const statusClass = rule.passed ? 'passed' : 'failed';
+          const icon = rule.passed ? '✓' : '✗';
+
+          html += '<div class="rule-item ' + statusClass + '">';
+          html += '<div class="rule-icon ' + statusClass + '">' + icon + '</div>';
+          html += '<div class="rule-content">';
+          html += '<div class="rule-name">' + rule.rule + '</div>';
+          html += '<div class="rule-details">';
+          html += '<strong>Actual:</strong> ' + rule.actual + ' | ';
+          html += '<strong>Required:</strong> ' + rule.threshold;
+          html += '</div>';
+          if (rule.math) {
+            html += '<div class="rule-math">' + rule.math + '</div>';
+          }
+          html += '</div>';
+          html += '</div>';
+        }
+
+        // Sizing calculation
+        if (eval_.sizingCalculation) {
+          const sizing = eval_.sizingCalculation;
+          html += '<div class="sizing-box">';
+          html += '<h4>Sizing Calculation</h4>';
+          html += '<div class="sizing-row"><span class="label">Mode:</span><span class="value">' + sizing.mode + '</span></div>';
+          html += '<div class="sizing-row"><span class="label">Input Value:</span><span class="value">' + sizing.inputValue + '</span></div>';
+          html += '<div class="sizing-row"><span class="label">Calculated Shares:</span><span class="value">' + sizing.calculatedShares.toFixed(0) + '</span></div>';
+          html += '<div class="sizing-row"><span class="label">Final Cost:</span><span class="value">$' + sizing.finalCost.toFixed(4) + '</span></div>';
+          html += '</div>';
+        }
+      }
+
+      html += '</div>';
+
+      content.innerHTML = html;
+      modal.classList.add('active');
+    }
+
+    function closeModal() {
+      document.getElementById('tradeModal').classList.remove('active');
+    }
+
+    // Close modal on overlay click
+    document.getElementById('tradeModal').addEventListener('click', function(e) {
+      if (e.target === this) closeModal();
+    });
+
+    // Close modal on Escape key
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape') {
+        closeModal();
+        closeFundingModal();
+      }
+    });
+
+    // ============ Funding Modal Functions ============
+
+    function showFundingModal(target, type) {
+      currentFundingTarget = target;
+      currentFundingType = type;
+
+      const modal = document.getElementById('fundingModal');
+      const title = document.getElementById('fundingTitle');
+      const input = document.getElementById('fundingAmount');
+
+      const isOperating = target === 'operating';
+      const targetLabel = isOperating ? 'Operating Account' : formatAddress(target);
+
+      title.textContent = (type === 'deposit' ? 'Deposit to ' : 'Withdraw from ') + targetLabel;
+      input.value = '';
+      input.focus();
+
+      modal.classList.add('active');
+    }
+
+    function closeFundingModal() {
+      document.getElementById('fundingModal').classList.remove('active');
+      currentFundingTarget = null;
+      currentFundingType = null;
+    }
+
+    async function submitFunding() {
+      const amount = parseFloat(document.getElementById('fundingAmount').value);
+      const note = document.getElementById('fundingNote').value.trim();
+
+      if (!amount || amount <= 0) {
+        alert('Please enter a valid amount');
+        return;
+      }
+
+      try {
+        const isOperating = currentFundingTarget === 'operating';
+        const endpoint = isOperating
+          ? \`/api/operating/\${currentFundingType}\`
+          : \`/api/wallets/\${encodeURIComponent(currentFundingTarget)}/\${currentFundingType}\`;
+
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ amount, note: note || undefined })
+        });
+
+        const data = await res.json();
+
+        if (!res.ok || data.error) {
+          alert('Error: ' + (data.error || 'Request failed'));
+          return;
+        }
+
+        closeFundingModal();
+        await refreshAll();
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+    }
+
+    // Close funding modal on overlay click
+    document.getElementById('fundingModal').addEventListener('click', function(e) {
+      if (e.target === this) closeFundingModal();
+    });
+
+    // ============ Settings Modal Functions ============
+
+    async function showSettingsModal(address) {
+      currentSettingsAddress = address;
+
+      const modal = document.getElementById('settingsModal');
+      const title = document.getElementById('settingsTitle');
+
+      title.textContent = 'Settings: ' + formatAddress(address);
+
+      // Fetch current config
+      try {
+        const res = await fetch(\`/api/wallets/\${encodeURIComponent(address)}/config\`);
+        const config = await res.json();
+
+        // Populate form
+        document.getElementById('settingsMaxCost').value = config.maxCostPerTrade || '';
+        document.getElementById('settingsMaxExposure').value = config.maxExposure || '';
+        document.getElementById('settingsMinPrice').value = config.minPrice || '';
+        document.getElementById('settingsMaxPrice').value = config.maxPrice || '';
+        document.getElementById('settingsSizingMode').value = config.sizingMode || '';
+        document.getElementById('settingsFixedDollar').value = config.fixedDollarAmount || '';
+        document.getElementById('settingsOverdraft').checked = config.allowOverdraft || false;
+
+        // Show/hide fixed dollar row
+        updateFixedDollarVisibility();
+
+      } catch (e) {
+        alert('Error loading settings: ' + e.message);
+        return;
+      }
+
+      modal.classList.add('active');
+    }
+
+    function closeSettingsModal() {
+      document.getElementById('settingsModal').classList.remove('active');
+      currentSettingsAddress = null;
+    }
+
+    function updateFixedDollarVisibility() {
+      const mode = document.getElementById('settingsSizingMode').value;
+      document.getElementById('fixedDollarRow').style.display = mode === 'fixed_dollar' ? 'block' : 'none';
+    }
+
+    // Add event listener for sizing mode change
+    document.getElementById('settingsSizingMode').addEventListener('change', updateFixedDollarVisibility);
+
+    async function saveSettings() {
+      if (!currentSettingsAddress) return;
+
+      const maxCost = document.getElementById('settingsMaxCost').value;
+      const maxExposure = document.getElementById('settingsMaxExposure').value;
+      const minPrice = document.getElementById('settingsMinPrice').value;
+      const maxPrice = document.getElementById('settingsMaxPrice').value;
+      const sizingMode = document.getElementById('settingsSizingMode').value;
+      const fixedDollar = document.getElementById('settingsFixedDollar').value;
+      const allowOverdraft = document.getElementById('settingsOverdraft').checked;
+
+      const config = {
+        maxCostPerTrade: maxCost ? parseFloat(maxCost) : null,
+        maxExposure: maxExposure ? parseFloat(maxExposure) : null,
+        minPrice: minPrice ? parseFloat(minPrice) : null,
+        maxPrice: maxPrice ? parseFloat(maxPrice) : null,
+        sizingMode: sizingMode || null,
+        fixedDollarAmount: fixedDollar ? parseFloat(fixedDollar) : null,
+        allowOverdraft: allowOverdraft,
+      };
+
+      try {
+        const res = await fetch(\`/api/wallets/\${encodeURIComponent(currentSettingsAddress)}/config\`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(config)
+        });
+
+        const data = await res.json();
+
+        if (!res.ok || data.error) {
+          alert('Error: ' + (data.error || 'Failed to save'));
+          return;
+        }
+
+        closeSettingsModal();
+        await refreshAll();
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+    }
+
+    // Close settings modal on overlay click
+    document.getElementById('settingsModal').addEventListener('click', function(e) {
+      if (e.target === this) closeSettingsModal();
+    });
   </script>
+
+  <!-- Trade Modal Overlay -->
+  <div id="tradeModal" class="modal-overlay">
+    <div class="modal" id="modalContent"></div>
+  </div>
+
+  <!-- Funding Modal Overlay -->
+  <div id="fundingModal" class="modal-overlay">
+    <div class="modal" style="max-width:400px">
+      <div class="modal-header">
+        <h3 id="fundingTitle">Deposit</h3>
+        <button class="modal-close" onclick="closeFundingModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div style="margin-bottom:15px">
+          <label style="display:block;color:#888;font-size:12px;margin-bottom:5px">Amount ($)</label>
+          <input type="number" id="fundingAmount" step="0.01" min="0" placeholder="0.00" style="width:100%;background:#222;border:1px solid #444;color:#fff;padding:12px;border-radius:4px;font-size:18px">
+        </div>
+        <div style="margin-bottom:20px">
+          <label style="display:block;color:#888;font-size:12px;margin-bottom:5px">Note (optional)</label>
+          <input type="text" id="fundingNote" placeholder="e.g., Initial funding" style="width:100%;background:#222;border:1px solid #444;color:#fff;padding:8px;border-radius:4px">
+        </div>
+        <button class="btn success" style="width:100%;padding:12px" onclick="submitFunding()">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings Modal Overlay -->
+  <div id="settingsModal" class="modal-overlay">
+    <div class="modal" style="max-width:450px">
+      <div class="modal-header">
+        <h3 id="settingsTitle">Wallet Settings</h3>
+        <button class="modal-close" onclick="closeSettingsModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p style="color:#888;font-size:12px;margin-bottom:15px">Leave blank to use global defaults</p>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:15px;margin-bottom:15px">
+          <div>
+            <label style="display:block;color:#888;font-size:12px;margin-bottom:5px">Max Cost Per Trade ($)</label>
+            <input type="number" id="settingsMaxCost" step="0.01" min="0" placeholder="Global default" style="width:100%;background:#222;border:1px solid #444;color:#fff;padding:8px;border-radius:4px">
+          </div>
+          <div>
+            <label style="display:block;color:#888;font-size:12px;margin-bottom:5px">Max Exposure ($)</label>
+            <input type="number" id="settingsMaxExposure" step="0.01" min="0" placeholder="Global default" style="width:100%;background:#222;border:1px solid #444;color:#fff;padding:8px;border-radius:4px">
+          </div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:15px;margin-bottom:15px">
+          <div>
+            <label style="display:block;color:#888;font-size:12px;margin-bottom:5px">Min Price (0.00-1.00)</label>
+            <input type="number" id="settingsMinPrice" step="0.01" min="0" max="1" placeholder="No minimum" style="width:100%;background:#222;border:1px solid #444;color:#fff;padding:8px;border-radius:4px">
+          </div>
+          <div>
+            <label style="display:block;color:#888;font-size:12px;margin-bottom:5px">Max Price (0.00-1.00)</label>
+            <input type="number" id="settingsMaxPrice" step="0.01" min="0" max="1" placeholder="No maximum" style="width:100%;background:#222;border:1px solid #444;color:#fff;padding:8px;border-radius:4px">
+          </div>
+        </div>
+
+        <div style="margin-bottom:15px">
+          <label style="display:block;color:#888;font-size:12px;margin-bottom:5px">Sizing Mode</label>
+          <select id="settingsSizingMode" style="width:100%;background:#222;border:1px solid #444;color:#fff;padding:8px;border-radius:4px">
+            <option value="">Use global default</option>
+            <option value="fixed_dollar">Fixed dollar amount</option>
+            <option value="match">Match target size</option>
+          </select>
+        </div>
+
+        <div id="fixedDollarRow" style="margin-bottom:15px;display:none">
+          <label style="display:block;color:#888;font-size:12px;margin-bottom:5px">Fixed Dollar Amount ($)</label>
+          <input type="number" id="settingsFixedDollar" step="0.01" min="0" placeholder="e.g., 5.00" style="width:100%;background:#222;border:1px solid #444;color:#fff;padding:8px;border-radius:4px">
+        </div>
+
+        <div style="margin-bottom:20px">
+          <label style="display:flex;align-items:center;gap:8px;color:#fff;cursor:pointer">
+            <input type="checkbox" id="settingsOverdraft" style="width:16px;height:16px">
+            Allow overdraft (trade even if balance goes negative)
+          </label>
+        </div>
+
+        <button class="btn success" style="width:100%;padding:12px" onclick="saveSettings()">Save Settings</button>
+      </div>
+    </div>
+  </div>
 </body>
 </html>
   `);

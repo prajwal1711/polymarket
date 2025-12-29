@@ -5,7 +5,8 @@
 import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as path from 'path';
-import { CopiedTrade, CopytradeRun, CopyTarget } from './types';
+import { v4 as uuidv4 } from 'uuid';
+import { CopiedTrade, CopytradeRun, CopyTarget, SubledgerTransaction, WalletStats, OperatingAccount } from './types';
 
 const DB_PATH = path.join(process.cwd(), 'data', 'markets.db');
 
@@ -79,6 +80,62 @@ export class CopytradeStorage {
     try {
       this.db.exec(`ALTER TABLE copied_trades ADD COLUMN market_slug TEXT`);
     } catch (e) { /* column exists */ }
+    try {
+      this.db.exec(`ALTER TABLE copied_trades ADD COLUMN rule_evaluation TEXT`);
+    } catch (e) { /* column exists */ }
+
+    // Subledger columns for copy_targets
+    try {
+      this.db.exec(`ALTER TABLE copy_targets ADD COLUMN total_deposited REAL DEFAULT 0`);
+    } catch (e) { /* column exists */ }
+    try {
+      this.db.exec(`ALTER TABLE copy_targets ADD COLUMN total_withdrawn REAL DEFAULT 0`);
+    } catch (e) { /* column exists */ }
+    try {
+      this.db.exec(`ALTER TABLE copy_targets ADD COLUMN max_cost_per_trade REAL`);
+    } catch (e) { /* column exists */ }
+    try {
+      this.db.exec(`ALTER TABLE copy_targets ADD COLUMN max_exposure REAL`);
+    } catch (e) { /* column exists */ }
+    try {
+      this.db.exec(`ALTER TABLE copy_targets ADD COLUMN sizing_mode TEXT`);
+    } catch (e) { /* column exists */ }
+    try {
+      this.db.exec(`ALTER TABLE copy_targets ADD COLUMN fixed_dollar_amount REAL`);
+    } catch (e) { /* column exists */ }
+    try {
+      this.db.exec(`ALTER TABLE copy_targets ADD COLUMN min_price REAL`);
+    } catch (e) { /* column exists */ }
+    try {
+      this.db.exec(`ALTER TABLE copy_targets ADD COLUMN max_price REAL`);
+    } catch (e) { /* column exists */ }
+    try {
+      this.db.exec(`ALTER TABLE copy_targets ADD COLUMN allow_overdraft INTEGER DEFAULT 0`);
+    } catch (e) { /* column exists */ }
+
+    // Subledger transactions table
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS subledger_transactions (
+        id TEXT PRIMARY KEY,
+        target_address TEXT NOT NULL,
+        type TEXT NOT NULL,
+        amount REAL NOT NULL,
+        note TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Operating account table
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS operating_account (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        total_deposited REAL DEFAULT 0,
+        total_withdrawn REAL DEFAULT 0,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    // Ensure operating account row exists
+    this.db.exec(`INSERT OR IGNORE INTO operating_account (id, total_deposited, total_withdrawn) VALUES (1, 0, 0)`);
 
     // Table for tracking the last seen trade timestamp per target
     this.db.exec(`
@@ -138,7 +195,7 @@ export class CopytradeStorage {
   }
 
   getTargets(enabledOnly: boolean = true): CopyTarget[] {
-    let query = 'SELECT address, alias, enabled, created_at FROM copy_targets';
+    let query = 'SELECT * FROM copy_targets';
     if (enabledOnly) {
       query += ' WHERE enabled = 1';
     }
@@ -150,13 +207,291 @@ export class CopytradeStorage {
       alias: row.alias,
       enabled: row.enabled === 1,
       createdAt: row.created_at,
+      totalDeposited: row.total_deposited || 0,
+      totalWithdrawn: row.total_withdrawn || 0,
+      maxCostPerTrade: row.max_cost_per_trade,
+      maxExposure: row.max_exposure,
+      sizingMode: row.sizing_mode,
+      fixedDollarAmount: row.fixed_dollar_amount,
+      minPrice: row.min_price,
+      maxPrice: row.max_price,
+      allowOverdraft: row.allow_overdraft === 1,
     }));
+  }
+
+  /**
+   * Get a single target by address
+   */
+  getTarget(address: string): CopyTarget | null {
+    const row = this.db.prepare('SELECT * FROM copy_targets WHERE address = ?').get(address.toLowerCase()) as any;
+    if (!row) return null;
+
+    return {
+      address: row.address,
+      alias: row.alias,
+      enabled: row.enabled === 1,
+      createdAt: row.created_at,
+      totalDeposited: row.total_deposited || 0,
+      totalWithdrawn: row.total_withdrawn || 0,
+      maxCostPerTrade: row.max_cost_per_trade,
+      maxExposure: row.max_exposure,
+      sizingMode: row.sizing_mode,
+      fixedDollarAmount: row.fixed_dollar_amount,
+      minPrice: row.min_price,
+      maxPrice: row.max_price,
+      allowOverdraft: row.allow_overdraft === 1,
+    };
   }
 
   setTargetEnabled(address: string, enabled: boolean): void {
     this.db.prepare(`
       UPDATE copy_targets SET enabled = ? WHERE address = ?
     `).run(enabled ? 1 : 0, address.toLowerCase());
+  }
+
+  /**
+   * Update target guardrails config
+   */
+  updateTargetConfig(address: string, config: {
+    maxCostPerTrade?: number | null;
+    maxExposure?: number | null;
+    sizingMode?: string | null;
+    fixedDollarAmount?: number | null;
+    minPrice?: number | null;
+    maxPrice?: number | null;
+    allowOverdraft?: boolean;
+    alias?: string;
+  }): void {
+    const updates: string[] = [];
+    const values: any[] = [];
+
+    if (config.maxCostPerTrade !== undefined) {
+      updates.push('max_cost_per_trade = ?');
+      values.push(config.maxCostPerTrade);
+    }
+    if (config.maxExposure !== undefined) {
+      updates.push('max_exposure = ?');
+      values.push(config.maxExposure);
+    }
+    if (config.sizingMode !== undefined) {
+      updates.push('sizing_mode = ?');
+      values.push(config.sizingMode);
+    }
+    if (config.fixedDollarAmount !== undefined) {
+      updates.push('fixed_dollar_amount = ?');
+      values.push(config.fixedDollarAmount);
+    }
+    if (config.minPrice !== undefined) {
+      updates.push('min_price = ?');
+      values.push(config.minPrice);
+    }
+    if (config.maxPrice !== undefined) {
+      updates.push('max_price = ?');
+      values.push(config.maxPrice);
+    }
+    if (config.allowOverdraft !== undefined) {
+      updates.push('allow_overdraft = ?');
+      values.push(config.allowOverdraft ? 1 : 0);
+    }
+    if (config.alias !== undefined) {
+      updates.push('alias = ?');
+      values.push(config.alias);
+    }
+
+    if (updates.length === 0) return;
+
+    values.push(address.toLowerCase());
+    this.db.prepare(`UPDATE copy_targets SET ${updates.join(', ')} WHERE address = ?`).run(...values);
+  }
+
+  // ============ Subledger: Deposits & Withdrawals ============
+
+  /**
+   * Deposit funds to a wallet's subledger
+   */
+  depositToWallet(targetAddress: string, amount: number, note?: string): SubledgerTransaction {
+    const id = uuidv4();
+    const addr = targetAddress.toLowerCase();
+
+    // Record transaction
+    this.db.prepare(`
+      INSERT INTO subledger_transactions (id, target_address, type, amount, note, created_at)
+      VALUES (?, ?, 'deposit', ?, ?, CURRENT_TIMESTAMP)
+    `).run(id, addr, amount, note || null);
+
+    // Update target's total_deposited
+    this.db.prepare(`
+      UPDATE copy_targets SET total_deposited = total_deposited + ? WHERE address = ?
+    `).run(amount, addr);
+
+    return {
+      id,
+      targetAddress: addr,
+      type: 'deposit',
+      amount,
+      note: note || null,
+      createdAt: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * Withdraw funds from a wallet's subledger
+   */
+  withdrawFromWallet(targetAddress: string, amount: number, note?: string): SubledgerTransaction {
+    const id = uuidv4();
+    const addr = targetAddress.toLowerCase();
+
+    // Record transaction
+    this.db.prepare(`
+      INSERT INTO subledger_transactions (id, target_address, type, amount, note, created_at)
+      VALUES (?, ?, 'withdrawal', ?, ?, CURRENT_TIMESTAMP)
+    `).run(id, addr, amount, note || null);
+
+    // Update target's total_withdrawn
+    this.db.prepare(`
+      UPDATE copy_targets SET total_withdrawn = total_withdrawn + ? WHERE address = ?
+    `).run(amount, addr);
+
+    return {
+      id,
+      targetAddress: addr,
+      type: 'withdrawal',
+      amount,
+      note: note || null,
+      createdAt: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * Get transaction history for a wallet
+   */
+  getWalletTransactions(targetAddress: string, limit: number = 50): SubledgerTransaction[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM subledger_transactions
+      WHERE target_address = ?
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(targetAddress.toLowerCase(), limit) as any[];
+
+    return rows.map(row => ({
+      id: row.id,
+      targetAddress: row.target_address,
+      type: row.type as 'deposit' | 'withdrawal',
+      amount: row.amount,
+      note: row.note,
+      createdAt: row.created_at,
+    }));
+  }
+
+  /**
+   * Get comprehensive wallet stats (subledger view)
+   */
+  getWalletStats(targetAddress: string): WalletStats | null {
+    const target = this.getTarget(targetAddress);
+    if (!target) return null;
+
+    const addr = targetAddress.toLowerCase();
+
+    // Get current exposure (sum of open positions)
+    const exposureRow = this.db.prepare(`
+      SELECT COALESCE(SUM(total_cost), 0) as exposure, COUNT(*) as count
+      FROM copied_positions
+      WHERE target_address = ? AND status = 'open'
+    `).get(addr) as any;
+
+    // Get realized P&L (sum of closed positions)
+    const pnlRow = this.db.prepare(`
+      SELECT COALESCE(SUM(pnl), 0) as pnl, COUNT(*) as count
+      FROM copied_positions
+      WHERE target_address = ? AND status = 'closed'
+    `).get(addr) as any;
+
+    const currentExposure = exposureRow?.exposure || 0;
+    const realizedPnl = pnlRow?.pnl || 0;
+    const openPositions = exposureRow?.count || 0;
+    const closedPositions = pnlRow?.count || 0;
+
+    // Available = deposited - withdrawn + realized_pnl - current_exposure
+    const availableBalance = target.totalDeposited - target.totalWithdrawn + realizedPnl - currentExposure;
+
+    // Return % = (current value - net deposits) / net deposits * 100
+    const netDeposits = target.totalDeposited - target.totalWithdrawn;
+    const currentValue = availableBalance + currentExposure;
+    const returnPercent = netDeposits > 0 ? ((currentValue - netDeposits) / netDeposits) * 100 : 0;
+
+    return {
+      address: target.address,
+      alias: target.alias || null,
+      enabled: target.enabled,
+      totalDeposited: target.totalDeposited,
+      totalWithdrawn: target.totalWithdrawn,
+      currentExposure,
+      realizedPnl,
+      availableBalance,
+      returnPercent,
+      openPositions,
+      closedPositions,
+    };
+  }
+
+  /**
+   * Get available balance for a wallet (for trade decisions)
+   */
+  getWalletAvailableBalance(targetAddress: string): number {
+    const stats = this.getWalletStats(targetAddress);
+    return stats?.availableBalance || 0;
+  }
+
+  /**
+   * Get all wallet stats
+   */
+  getAllWalletStats(): WalletStats[] {
+    const targets = this.getTargets(false);
+    return targets.map(t => this.getWalletStats(t.address)).filter(s => s !== null) as WalletStats[];
+  }
+
+  // ============ Operating Account ============
+
+  /**
+   * Deposit to operating account
+   */
+  depositToOperating(amount: number): void {
+    this.db.prepare(`
+      UPDATE operating_account SET total_deposited = total_deposited + ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1
+    `).run(amount);
+  }
+
+  /**
+   * Withdraw from operating account
+   */
+  withdrawFromOperating(amount: number): void {
+    this.db.prepare(`
+      UPDATE operating_account SET total_withdrawn = total_withdrawn + ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1
+    `).run(amount);
+  }
+
+  /**
+   * Get operating account status
+   */
+  getOperatingAccount(): OperatingAccount {
+    const row = this.db.prepare('SELECT * FROM operating_account WHERE id = 1').get() as any;
+
+    // Total allocated to wallets = sum of all wallet deposits - withdrawals
+    const allocRow = this.db.prepare(`
+      SELECT COALESCE(SUM(total_deposited - total_withdrawn), 0) as allocated
+      FROM copy_targets
+    `).get() as any;
+
+    const totalDeposited = row?.total_deposited || 0;
+    const totalWithdrawn = row?.total_withdrawn || 0;
+    const totalAllocatedToWallets = allocRow?.allocated || 0;
+
+    return {
+      totalDeposited,
+      totalWithdrawn,
+      totalAllocatedToWallets,
+      availableBalance: totalDeposited - totalWithdrawn - totalAllocatedToWallets,
+    };
   }
 
   // ============ Cursor Management (track last seen trade) ============
@@ -214,8 +549,8 @@ export class CopytradeStorage {
       INSERT OR REPLACE INTO copied_trades (
         id, original_trade_id, target_address, token_id, condition_id,
         side, original_price, original_size, copy_price, copy_size, copy_cost,
-        order_id, status, skip_reason, created_at, executed_at, market_title, market_slug
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        order_id, status, skip_reason, created_at, executed_at, market_title, market_slug, rule_evaluation
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       trade.id,
       trade.originalTradeId,
@@ -234,7 +569,8 @@ export class CopytradeStorage {
       trade.createdAt,
       trade.executedAt,
       trade.marketTitle || null,
-      trade.marketSlug || null
+      trade.marketSlug || null,
+      trade.ruleEvaluation ? JSON.stringify(trade.ruleEvaluation) : null
     );
   }
 
@@ -334,6 +670,7 @@ export class CopytradeStorage {
       executedAt: row.executed_at,
       marketTitle: row.market_title,
       marketSlug: row.market_slug,
+      ruleEvaluation: row.rule_evaluation ? JSON.parse(row.rule_evaluation) : null,
     }));
   }
 

@@ -208,4 +208,67 @@ export class PolymarketDataApi {
       return false;
     }
   }
+
+  /**
+   * Get USDC balance for a wallet (on-chain query via Polygon RPC)
+   * USDC on Polygon: 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174
+   */
+  async getUSDCBalance(address: string): Promise<number> {
+    try {
+      const USDC_CONTRACT = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+      const RPC_URL = 'https://polygon-rpc.com';
+
+      // ERC20 balanceOf(address) function selector
+      const data = '0x70a08231000000000000000000000000' + address.toLowerCase().slice(2);
+
+      const response = await axios.post(RPC_URL, {
+        jsonrpc: '2.0',
+        method: 'eth_call',
+        params: [{
+          to: USDC_CONTRACT,
+          data: data,
+        }, 'latest'],
+        id: 1,
+      });
+
+      if (response.data?.result) {
+        // USDC has 6 decimals
+        const balanceWei = BigInt(response.data.result);
+        return Number(balanceWei) / 1e6;
+      }
+
+      return 0;
+    } catch (error: any) {
+      console.warn(`Failed to get USDC balance: ${error?.message}`);
+      return 0;
+    }
+  }
+
+  /**
+   * Get complete wallet state from Polymarket for reconciliation
+   */
+  async getWalletState(address: string): Promise<{
+    usdcBalance: number;
+    positions: DataApiPosition[];
+    totalPositionValue: number;
+    totalEquity: number;
+  }> {
+    const [usdcBalance, positions] = await Promise.all([
+      this.getUSDCBalance(address),
+      this.getPositionsForWallet(address),
+    ]);
+
+    // Calculate total position value
+    let totalPositionValue = 0;
+    for (const pos of positions) {
+      totalPositionValue += pos.size * pos.curPrice;
+    }
+
+    return {
+      usdcBalance,
+      positions,
+      totalPositionValue,
+      totalEquity: usdcBalance + totalPositionValue,
+    };
+  }
 }

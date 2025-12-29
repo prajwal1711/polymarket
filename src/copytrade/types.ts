@@ -48,12 +48,58 @@ export interface PolymarketPosition {
   outcome: string;
 }
 
-// Wallet to copy trades from
+// Wallet to copy trades from (subledger)
 export interface CopyTarget {
   address: string;
   alias?: string;
   enabled: boolean;
   createdAt: string;
+
+  // Subledger: Funding
+  totalDeposited: number;       // Sum of all deposits
+  totalWithdrawn: number;       // Sum of all withdrawals
+
+  // Per-wallet guardrails (null = use global default)
+  maxCostPerTrade: number | null;
+  maxExposure: number | null;
+  sizingMode: 'fixed_dollar' | 'fixed_shares' | 'proportional' | 'match' | null;
+  fixedDollarAmount: number | null;
+  minPrice: number | null;
+  maxPrice: number | null;
+  allowOverdraft: boolean;      // OD facility (default: false)
+}
+
+// Subledger transaction (deposit/withdrawal)
+export interface SubledgerTransaction {
+  id: string;
+  targetAddress: string;
+  type: 'deposit' | 'withdrawal';
+  amount: number;
+  note: string | null;
+  createdAt: string;
+}
+
+// Operating account for unallocated funds
+export interface OperatingAccount {
+  totalDeposited: number;
+  totalWithdrawn: number;
+  totalAllocatedToWallets: number;  // Sum of deposits to all wallets
+  availableBalance: number;         // Calculated
+}
+
+// Wallet stats (calculated)
+export interface WalletStats {
+  address: string;
+  alias: string | null;
+  enabled: boolean;
+  totalDeposited: number;
+  totalWithdrawn: number;
+  currentExposure: number;      // Sum of open positions
+  realizedPnl: number;          // Sum of closed position P&L
+  availableBalance: number;     // deposited - withdrawn + pnl - exposure
+  returnPercent: number;        // (available + exposure - deposited + withdrawn) / deposited * 100
+  openPositions: number;
+  closedPositions: number;
 }
 
 // A trade we've identified to copy
@@ -66,6 +112,29 @@ export interface CopyCandidate {
   originalPrice: number;
   originalSize: number;
   matchTime: string;
+}
+
+// Individual rule evaluation result
+export interface RuleEvaluation {
+  rule: string;           // Rule name/description
+  passed: boolean;        // Did the rule pass?
+  actual: string;         // Actual value (formatted)
+  threshold: string;      // Threshold value (formatted)
+  math?: string;          // Optional math breakdown
+}
+
+// Complete guardrail evaluation for a trade
+export interface GuardrailEvaluation {
+  timestamp: string;
+  side: 'BUY' | 'SELL';
+  outcome: 'placed' | 'skipped' | 'failed';
+  rules: RuleEvaluation[];
+  sizingCalculation?: {
+    mode: string;
+    inputValue: number;
+    calculatedShares: number;
+    finalCost: number;
+  };
 }
 
 // A copied trade record
@@ -88,6 +157,7 @@ export interface CopiedTrade {
   executedAt: string | null;
   marketTitle: string | null;
   marketSlug: string | null;
+  ruleEvaluation: GuardrailEvaluation | null;
 }
 
 // Copytrade run record

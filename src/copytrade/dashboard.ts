@@ -62,11 +62,42 @@ app.get('/api/summary', (req: Request, res: Response) => {
   }
 });
 
-// Get open positions
+// Get open positions (with target alias and market info)
 app.get('/api/positions', (req: Request, res: Response) => {
   try {
     const positions = storage.getOpenPositions();
-    res.json(positions);
+    const targets = storage.getTargets(false);
+
+    // Create a map of address -> alias for quick lookup
+    const aliasMap = new Map<string, string>();
+    for (const t of targets) {
+      aliasMap.set(t.address.toLowerCase(), t.alias || t.address.substring(0, 10) + '...');
+    }
+
+    // Get market info from trades for each position's token
+    const trades = storage.getCopiedTrades({ limit: 500 });
+    const marketInfoMap = new Map<string, { title: string; slug: string }>();
+    for (const trade of trades) {
+      if (trade.marketTitle && !marketInfoMap.has(trade.tokenId)) {
+        marketInfoMap.set(trade.tokenId, {
+          title: trade.marketTitle,
+          slug: trade.marketSlug || '',
+        });
+      }
+    }
+
+    // Enrich positions
+    const enrichedPositions = positions.map(pos => {
+      const marketInfo = marketInfoMap.get(pos.tokenId);
+      return {
+        ...pos,
+        targetAlias: aliasMap.get(pos.targetAddress.toLowerCase()) || pos.targetAddress.substring(0, 10) + '...',
+        marketTitle: marketInfo?.title || null,
+        marketSlug: marketInfo?.slug || null,
+      };
+    });
+
+    res.json(enrichedPositions);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -868,7 +899,8 @@ app.get('/', (req: Request, res: Response) => {
       <table>
         <thead>
           <tr>
-            <th>Token</th>
+            <th>From</th>
+            <th>Market</th>
             <th>Shares</th>
             <th>Entry Price</th>
             <th>Cost</th>
@@ -1090,10 +1122,11 @@ app.get('/', (req: Request, res: Response) => {
 
       const tbody = document.getElementById('positionsTable');
       tbody.innerHTML = positions.length === 0
-        ? '<tr><td colspan="5" style="text-align:center;color:#666">No open positions</td></tr>'
+        ? '<tr><td colspan="6" style="text-align:center;color:#666">No open positions</td></tr>'
         : positions.map(p => \`
           <tr>
-            <td class="address truncate">\${p.tokenId.substring(0, 20)}...</td>
+            <td style="font-size:12px;color:#fbbf24" title="\${p.targetAddress}">\${p.targetAlias || '-'}</td>
+            <td style="max-width:250px">\${formatMarket(p.marketTitle, p.marketSlug, null)}</td>
             <td>\${p.shares.toFixed(1)}</td>
             <td>\${formatMoney(p.avgEntryPrice)}</td>
             <td>\${formatMoney(p.totalCost)}</td>

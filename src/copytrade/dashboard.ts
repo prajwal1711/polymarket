@@ -342,6 +342,29 @@ app.post('/api/operating/withdraw', (req: Request, res: Response) => {
   }
 });
 
+// ============ Global Config API ============
+
+// Get global config
+app.get('/api/config', (req: Request, res: Response) => {
+  try {
+    const config = storage.getGlobalConfig();
+    res.json(config);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update global config
+app.patch('/api/config', (req: Request, res: Response) => {
+  try {
+    const config = req.body;
+    storage.updateGlobalConfig(config);
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ============ Reconciliation API ============
 
 // Get our Polymarket wallet state (USDC + positions)
@@ -667,6 +690,7 @@ app.get('/', (req: Request, res: Response) => {
     <div>
       <span class="last-update" id="lastUpdate">Loading...</span>
       <button class="btn" onclick="refreshAll()">Refresh</button>
+      <button class="btn" onclick="showGlobalSettingsModal()" style="background:#4a4a00">Global Settings</button>
       <button class="btn success" id="resumeAllBtn" onclick="resumeAll()">Resume All</button>
       <button class="btn danger" id="pauseAllBtn" onclick="pauseAll()">Pause All</button>
     </div>
@@ -762,6 +786,43 @@ app.get('/', (req: Request, res: Response) => {
     <div style="margin-top:15px;text-align:right">
       <button class="btn success" onclick="showFundingModal('operating', 'deposit')">Deposit</button>
       <button class="btn danger" onclick="showFundingModal('operating', 'withdraw')">Withdraw</button>
+    </div>
+  </div>
+
+  <!-- Global Config Summary Card -->
+  <div class="card" style="margin-bottom:20px;background:#2a2a1a;border-color:#4a4a2d">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <h2 style="color:#fbbf24">Conviction Sizing (Global Defaults)</h2>
+      <button class="btn" onclick="showGlobalSettingsModal()" style="background:#4a4a00">Edit</button>
+    </div>
+    <div class="stat-grid" style="grid-template-columns: repeat(6, 1fr); margin-top:10px">
+      <div class="stat">
+        <div class="stat-value" id="gcSizingMode" style="font-size:18px">-</div>
+        <div class="stat-label">Sizing Mode</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="gcCopyRatio" style="font-size:18px">-</div>
+        <div class="stat-label">Copy Ratio</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="gcMaxCost" style="font-size:18px">-</div>
+        <div class="stat-label">Max Cost/Trade</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="gcMaxExposure" style="font-size:18px">-</div>
+        <div class="stat-label">Max Exposure</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="gcMinPrice" style="font-size:18px">-</div>
+        <div class="stat-label">Min Price</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="gcMaxPrice" style="font-size:18px">-</div>
+        <div class="stat-label">Max Price</div>
+      </div>
+    </div>
+    <div style="margin-top:10px;font-size:12px;color:#888">
+      <strong>Conviction mode:</strong> Trades $1-$5 matched 1:1 | Trades >$5 scaled by Copy Ratio (min $1, max by Max Cost)
     </div>
   </div>
 
@@ -1247,6 +1308,18 @@ app.get('/', (req: Request, res: Response) => {
         \`).join('');
     }
 
+    async function fetchGlobalConfig() {
+      const res = await fetch('/api/config');
+      const config = await res.json();
+
+      document.getElementById('gcSizingMode').textContent = config.sizingMode || 'conviction';
+      document.getElementById('gcCopyRatio').textContent = ((config.copyRatio || 0.1) * 100).toFixed(0) + '%';
+      document.getElementById('gcMaxCost').textContent = formatMoney(config.maxCostPerTrade || 10);
+      document.getElementById('gcMaxExposure').textContent = formatMoney(config.maxExposurePerTarget || 50);
+      document.getElementById('gcMinPrice').textContent = (config.minPrice || 0.01).toFixed(2);
+      document.getElementById('gcMaxPrice').textContent = (config.maxPrice || 0.99).toFixed(2);
+    }
+
     async function refreshAll() {
       document.getElementById('lastUpdate').textContent = 'Updating...';
       await Promise.all([
@@ -1255,6 +1328,7 @@ app.get('/', (req: Request, res: Response) => {
         fetchTrades(),
         fetchWallets(),
         fetchOperatingAccount(),
+        fetchGlobalConfig(),
         fetchRuns(),
       ]);
       document.getElementById('lastUpdate').textContent = 'Updated: ' + new Date().toLocaleTimeString();
@@ -1519,6 +1593,75 @@ app.get('/', (req: Request, res: Response) => {
     document.getElementById('settingsModal').addEventListener('click', function(e) {
       if (e.target === this) closeSettingsModal();
     });
+
+    // ============ Global Settings Modal Functions ============
+
+    async function showGlobalSettingsModal() {
+      const modal = document.getElementById('globalSettingsModal');
+
+      try {
+        const res = await fetch('/api/config');
+        const config = await res.json();
+
+        document.getElementById('globalSizingMode').value = config.sizingMode || 'conviction';
+        document.getElementById('globalCopyRatio').value = config.copyRatio || 0.10;
+        document.getElementById('globalMaxCost').value = config.maxCostPerTrade || 10;
+        document.getElementById('globalMaxExposure').value = config.maxExposurePerTarget || 50;
+        document.getElementById('globalMinPrice').value = config.minPrice || 0.01;
+        document.getElementById('globalMaxPrice').value = config.maxPrice || 0.99;
+
+      } catch (e) {
+        alert('Error loading global config: ' + e.message);
+        return;
+      }
+
+      modal.classList.add('active');
+    }
+
+    function closeGlobalSettingsModal() {
+      document.getElementById('globalSettingsModal').classList.remove('active');
+    }
+
+    async function saveGlobalSettings() {
+      const config = {
+        sizingMode: document.getElementById('globalSizingMode').value,
+        copyRatio: parseFloat(document.getElementById('globalCopyRatio').value) || 0.10,
+        maxCostPerTrade: parseFloat(document.getElementById('globalMaxCost').value) || 10,
+        maxExposurePerTarget: parseFloat(document.getElementById('globalMaxExposure').value) || 50,
+        minPrice: parseFloat(document.getElementById('globalMinPrice').value) || 0.01,
+        maxPrice: parseFloat(document.getElementById('globalMaxPrice').value) || 0.99,
+      };
+
+      try {
+        const res = await fetch('/api/config', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(config)
+        });
+
+        const data = await res.json();
+
+        if (!res.ok || data.error) {
+          alert('Error: ' + (data.error || 'Failed to save'));
+          return;
+        }
+
+        closeGlobalSettingsModal();
+        await refreshAll();
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+    }
+
+    // Close global settings modal on overlay click
+    document.getElementById('globalSettingsModal').addEventListener('click', function(e) {
+      if (e.target === this) closeGlobalSettingsModal();
+    });
+
+    // Close global settings modal on Escape
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape') closeGlobalSettingsModal();
+    });
   </script>
 
   <!-- Trade Modal Overlay -->
@@ -1608,6 +1751,67 @@ app.get('/', (req: Request, res: Response) => {
         </div>
 
         <button class="btn success" style="width:100%;padding:12px" onclick="saveSettings()">Save Settings</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Global Settings Modal -->
+  <div id="globalSettingsModal" class="modal-overlay">
+    <div class="modal" style="max-width:500px">
+      <div class="modal-header">
+        <h3>Global Default Settings</h3>
+        <button class="modal-close" onclick="closeGlobalSettingsModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p style="color:#888;font-size:12px;margin-bottom:15px">These defaults apply to all wallets unless overridden per-wallet</p>
+
+        <div style="margin-bottom:15px">
+          <label style="display:block;color:#888;font-size:12px;margin-bottom:5px">Sizing Mode</label>
+          <select id="globalSizingMode" style="width:100%;background:#222;border:1px solid #444;color:#fff;padding:8px;border-radius:4px">
+            <option value="conviction">Conviction (match small, scale large)</option>
+            <option value="fixed_dollar">Fixed dollar amount</option>
+            <option value="match">Match target size</option>
+          </select>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:15px;margin-bottom:15px">
+          <div>
+            <label style="display:block;color:#888;font-size:12px;margin-bottom:5px">Copy Ratio (0.01-1.00)</label>
+            <input type="number" id="globalCopyRatio" step="0.01" min="0.01" max="1" placeholder="0.10" style="width:100%;background:#222;border:1px solid #444;color:#fff;padding:8px;border-radius:4px">
+            <div style="font-size:11px;color:#666;margin-top:2px">e.g., 0.10 = 10% of target trade</div>
+          </div>
+          <div>
+            <label style="display:block;color:#888;font-size:12px;margin-bottom:5px">Max Cost Per Trade ($)</label>
+            <input type="number" id="globalMaxCost" step="0.5" min="1" placeholder="10" style="width:100%;background:#222;border:1px solid #444;color:#fff;padding:8px;border-radius:4px">
+          </div>
+        </div>
+
+        <div style="margin-bottom:15px">
+          <label style="display:block;color:#888;font-size:12px;margin-bottom:5px">Max Exposure Per Target ($)</label>
+          <input type="number" id="globalMaxExposure" step="5" min="1" placeholder="50" style="width:100%;background:#222;border:1px solid #444;color:#fff;padding:8px;border-radius:4px">
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:15px;margin-bottom:20px">
+          <div>
+            <label style="display:block;color:#888;font-size:12px;margin-bottom:5px">Min Price (0.01-0.99)</label>
+            <input type="number" id="globalMinPrice" step="0.01" min="0.01" max="0.99" placeholder="0.01" style="width:100%;background:#222;border:1px solid #444;color:#fff;padding:8px;border-radius:4px">
+          </div>
+          <div>
+            <label style="display:block;color:#888;font-size:12px;margin-bottom:5px">Max Price (0.01-0.99)</label>
+            <input type="number" id="globalMaxPrice" step="0.01" min="0.01" max="0.99" placeholder="0.99" style="width:100%;background:#222;border:1px solid #444;color:#fff;padding:8px;border-radius:4px">
+          </div>
+        </div>
+
+        <div style="background:#222;border-radius:6px;padding:12px;margin-bottom:20px">
+          <div style="font-size:12px;color:#fbbf24;margin-bottom:8px">Conviction Sizing Logic:</div>
+          <div style="font-size:11px;color:#888;line-height:1.6">
+            • Trades < $1: <span style="color:#ef4444">Skip</span> (dust)<br>
+            • Trades $1-$5: <span style="color:#22c55e">Match 1:1</span><br>
+            • Trades > $5: <span style="color:#3b82f6">max($1, ratio × target)</span>, capped at Max Cost
+          </div>
+        </div>
+
+        <button class="btn success" style="width:100%;padding:12px" onclick="saveGlobalSettings()">Save Global Settings</button>
       </div>
     </div>
   </div>

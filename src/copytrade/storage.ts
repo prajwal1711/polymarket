@@ -140,6 +140,22 @@ export class CopytradeStorage {
     // Ensure operating account row exists
     this.db.exec(`INSERT OR IGNORE INTO operating_account (id, total_deposited, total_withdrawn) VALUES (1, 0, 0)`);
 
+    // Global config table
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS global_config (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        sizing_mode TEXT DEFAULT 'conviction',
+        copy_ratio REAL DEFAULT 0.10,
+        max_cost_per_trade REAL DEFAULT 10,
+        max_exposure_per_target REAL DEFAULT 50,
+        min_price REAL DEFAULT 0.01,
+        max_price REAL DEFAULT 0.99,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    // Ensure global config row exists
+    this.db.exec(`INSERT OR IGNORE INTO global_config (id) VALUES (1)`);
+
     // Table for tracking the last seen trade timestamp per target
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS copy_cursors (
@@ -502,6 +518,76 @@ export class CopytradeStorage {
       totalAllocatedToWallets,
       availableBalance: totalDeposited - totalWithdrawn - totalAllocatedToWallets,
     };
+  }
+
+  // ============ Global Config ============
+
+  /**
+   * Get global config defaults
+   */
+  getGlobalConfig(): {
+    sizingMode: string;
+    copyRatio: number;
+    maxCostPerTrade: number;
+    maxExposurePerTarget: number;
+    minPrice: number;
+    maxPrice: number;
+  } {
+    const row = this.db.prepare('SELECT * FROM global_config WHERE id = 1').get() as any;
+
+    return {
+      sizingMode: row?.sizing_mode || 'conviction',
+      copyRatio: row?.copy_ratio ?? 0.10,
+      maxCostPerTrade: row?.max_cost_per_trade ?? 10,
+      maxExposurePerTarget: row?.max_exposure_per_target ?? 50,
+      minPrice: row?.min_price ?? 0.01,
+      maxPrice: row?.max_price ?? 0.99,
+    };
+  }
+
+  /**
+   * Update global config
+   */
+  updateGlobalConfig(config: {
+    sizingMode?: string;
+    copyRatio?: number;
+    maxCostPerTrade?: number;
+    maxExposurePerTarget?: number;
+    minPrice?: number;
+    maxPrice?: number;
+  }): void {
+    const updates: string[] = [];
+    const values: any[] = [];
+
+    if (config.sizingMode !== undefined) {
+      updates.push('sizing_mode = ?');
+      values.push(config.sizingMode);
+    }
+    if (config.copyRatio !== undefined) {
+      updates.push('copy_ratio = ?');
+      values.push(config.copyRatio);
+    }
+    if (config.maxCostPerTrade !== undefined) {
+      updates.push('max_cost_per_trade = ?');
+      values.push(config.maxCostPerTrade);
+    }
+    if (config.maxExposurePerTarget !== undefined) {
+      updates.push('max_exposure_per_target = ?');
+      values.push(config.maxExposurePerTarget);
+    }
+    if (config.minPrice !== undefined) {
+      updates.push('min_price = ?');
+      values.push(config.minPrice);
+    }
+    if (config.maxPrice !== undefined) {
+      updates.push('max_price = ?');
+      values.push(config.maxPrice);
+    }
+
+    if (updates.length === 0) return;
+
+    updates.push('updated_at = CURRENT_TIMESTAMP');
+    this.db.prepare(`UPDATE global_config SET ${updates.join(', ')} WHERE id = 1`).run(...values);
   }
 
   // ============ Cursor Management (track last seen trade) ============

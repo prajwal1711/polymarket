@@ -112,6 +112,9 @@ export class CopytradeStorage {
     try {
       this.db.exec(`ALTER TABLE copy_targets ADD COLUMN allow_overdraft INTEGER DEFAULT 0`);
     } catch (e) { /* column exists */ }
+    try {
+      this.db.exec(`ALTER TABLE copy_targets ADD COLUMN copy_ratio REAL`);
+    } catch (e) { /* column exists */ }
 
     // Subledger transactions table
     this.db.exec(`
@@ -213,6 +216,7 @@ export class CopytradeStorage {
       maxExposure: row.max_exposure,
       sizingMode: row.sizing_mode,
       fixedDollarAmount: row.fixed_dollar_amount,
+      copyRatio: row.copy_ratio,
       minPrice: row.min_price,
       maxPrice: row.max_price,
       allowOverdraft: row.allow_overdraft === 1,
@@ -237,6 +241,7 @@ export class CopytradeStorage {
       maxExposure: row.max_exposure,
       sizingMode: row.sizing_mode,
       fixedDollarAmount: row.fixed_dollar_amount,
+      copyRatio: row.copy_ratio,
       minPrice: row.min_price,
       maxPrice: row.max_price,
       allowOverdraft: row.allow_overdraft === 1,
@@ -257,6 +262,7 @@ export class CopytradeStorage {
     maxExposure?: number | null;
     sizingMode?: string | null;
     fixedDollarAmount?: number | null;
+    copyRatio?: number | null;
     minPrice?: number | null;
     maxPrice?: number | null;
     allowOverdraft?: boolean;
@@ -280,6 +286,10 @@ export class CopytradeStorage {
     if (config.fixedDollarAmount !== undefined) {
       updates.push('fixed_dollar_amount = ?');
       values.push(config.fixedDollarAmount);
+    }
+    if (config.copyRatio !== undefined) {
+      updates.push('copy_ratio = ?');
+      values.push(config.copyRatio);
     }
     if (config.minPrice !== undefined) {
       updates.push('min_price = ?');

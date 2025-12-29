@@ -97,6 +97,7 @@ export class Copier {
       maxExposure: target?.maxExposure ?? this.config.maxExposurePerTarget,
       sizingMode: target?.sizingMode ?? this.config.sizingMode,
       fixedDollarAmount: target?.fixedDollarAmount ?? this.config.fixedDollarAmount,
+      copyRatio: target?.copyRatio ?? this.config.copyRatio ?? 0.10,
       minPrice: target?.minPrice ?? this.config.minOriginalPrice,
       maxPrice: target?.maxPrice ?? this.config.maxOriginalPrice,
       allowOverdraft: target?.allowOverdraft ?? false,
@@ -378,9 +379,11 @@ export class Copier {
           // Add sizing calculation to evaluation
           const sizingMode = effectiveConfig.sizingMode || this.config.sizingMode;
           const fixedDollarAmount = effectiveConfig.fixedDollarAmount ?? this.config.fixedDollarAmount ?? 5;
+          const targetTradeValue = trade.size * trade.price;
           fullEvaluation.sizingCalculation = {
             mode: sizingMode,
-            inputValue: sizingMode === 'fixed_dollar' ? fixedDollarAmount :
+            inputValue: sizingMode === 'conviction' ? targetTradeValue :
+                       sizingMode === 'fixed_dollar' ? fixedDollarAmount :
                        sizingMode === 'fixed_shares' ? (this.config.fixedShares || 5) :
                        sizingMode === 'proportional' ? (this.config.proportionalRatio || 0.1) :
                        trade.size,
@@ -683,33 +686,70 @@ export class Copier {
   /**
    * Calculate the size to copy based on config
    * Returns number of shares to buy
+   *
+   * Conviction mode sizing strategy:
+   * - Target trade value < $1 → skip (dust)
+   * - Target trade value $1-$5 → match 1:1 (same dollar amount)
+   * - Target trade value > $5 → max($1, copyRatio × targetValue), capped at maxCostPerTrade
    */
   private calculateCopySize(trade: DataApiTrade, effectiveConfig?: {
-    sizingMode: string;
-    fixedDollarAmount: number | undefined;
+    sizingMode?: string;
+    fixedDollarAmount?: number;
+    copyRatio?: number;
+    maxCostPerTrade?: number;
   }): number {
     const sizingMode = effectiveConfig?.sizingMode || this.config.sizingMode;
     const fixedDollarAmount = effectiveConfig?.fixedDollarAmount ?? this.config.fixedDollarAmount ?? 5;
+    const copyRatio = effectiveConfig?.copyRatio ?? this.config.copyRatio ?? 0.10;
+    const maxCostPerTrade = effectiveConfig?.maxCostPerTrade ?? this.config.maxCostPerTrade ?? 10;
 
     switch (sizingMode) {
-      case 'fixed_dollar':
+      case 'conviction': {
+        // Calculate target's trade value in dollars
+        const targetTradeValue = trade.size * trade.price;
+
+        // Dust: skip trades < $1
+        if (targetTradeValue < 1) {
+          return 0;
+        }
+
+        let dollarAmount: number;
+
+        // Small trades ($1-$5): match 1:1
+        if (targetTradeValue <= 5) {
+          dollarAmount = targetTradeValue;
+        } else {
+          // Large trades (>$5): max($1, copyRatio × targetValue), capped at maxCostPerTrade
+          const proportionalAmount = copyRatio * targetTradeValue;
+          dollarAmount = Math.max(1, proportionalAmount);
+          dollarAmount = Math.min(dollarAmount, maxCostPerTrade);
+        }
+
+        // Convert dollars to shares
+        const shares = dollarAmount / trade.price;
+        return Math.floor(shares); // Round down to whole shares
+      }
+
+      case 'fixed_dollar': {
         // Spend a fixed dollar amount → calculate shares
         const shares = fixedDollarAmount / trade.price;
         return Math.floor(shares); // Round down to whole shares
+      }
 
       case 'fixed_shares':
         return this.config.fixedShares || 5;
 
-      case 'proportional':
+      case 'proportional': {
         const ratio = this.config.proportionalRatio || 0.1;
         return Math.max(1, Math.floor(trade.size * ratio));
+      }
 
       case 'match':
         return trade.size;
 
       default:
-        // Default to fixed dollar amount
-        return Math.floor(fixedDollarAmount / trade.price);
+        // Default to conviction mode
+        return this.calculateCopySize(trade, { ...effectiveConfig, sizingMode: 'conviction' });
     }
   }
 

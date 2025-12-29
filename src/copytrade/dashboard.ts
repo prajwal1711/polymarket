@@ -280,6 +280,7 @@ app.get('/api/wallets/:address/config', (req: Request, res: Response) => {
       maxExposure: target.maxExposure,
       sizingMode: target.sizingMode,
       fixedDollarAmount: target.fixedDollarAmount,
+      copyRatio: target.copyRatio,
       minPrice: target.minPrice,
       maxPrice: target.maxPrice,
       allowOverdraft: target.allowOverdraft,
@@ -1442,10 +1443,11 @@ app.get('/', (req: Request, res: Response) => {
         document.getElementById('settingsMaxPrice').value = config.maxPrice || '';
         document.getElementById('settingsSizingMode').value = config.sizingMode || '';
         document.getElementById('settingsFixedDollar').value = config.fixedDollarAmount || '';
+        document.getElementById('settingsCopyRatio').value = config.copyRatio || '';
         document.getElementById('settingsOverdraft').checked = config.allowOverdraft || false;
 
-        // Show/hide fixed dollar row
-        updateFixedDollarVisibility();
+        // Show/hide mode-specific rows
+        updateSizingModeVisibility();
 
       } catch (e) {
         alert('Error loading settings: ' + e.message);
@@ -1460,13 +1462,14 @@ app.get('/', (req: Request, res: Response) => {
       currentSettingsAddress = null;
     }
 
-    function updateFixedDollarVisibility() {
+    function updateSizingModeVisibility() {
       const mode = document.getElementById('settingsSizingMode').value;
       document.getElementById('fixedDollarRow').style.display = mode === 'fixed_dollar' ? 'block' : 'none';
+      document.getElementById('copyRatioRow').style.display = mode === 'conviction' ? 'block' : 'none';
     }
 
     // Add event listener for sizing mode change
-    document.getElementById('settingsSizingMode').addEventListener('change', updateFixedDollarVisibility);
+    document.getElementById('settingsSizingMode').addEventListener('change', updateSizingModeVisibility);
 
     async function saveSettings() {
       if (!currentSettingsAddress) return;
@@ -1477,6 +1480,7 @@ app.get('/', (req: Request, res: Response) => {
       const maxPrice = document.getElementById('settingsMaxPrice').value;
       const sizingMode = document.getElementById('settingsSizingMode').value;
       const fixedDollar = document.getElementById('settingsFixedDollar').value;
+      const copyRatio = document.getElementById('settingsCopyRatio').value;
       const allowOverdraft = document.getElementById('settingsOverdraft').checked;
 
       const config = {
@@ -1486,6 +1490,7 @@ app.get('/', (req: Request, res: Response) => {
         maxPrice: maxPrice ? parseFloat(maxPrice) : null,
         sizingMode: sizingMode || null,
         fixedDollarAmount: fixedDollar ? parseFloat(fixedDollar) : null,
+        copyRatio: copyRatio ? parseFloat(copyRatio) : null,
         allowOverdraft: allowOverdraft,
       };
 
@@ -1578,9 +1583,16 @@ app.get('/', (req: Request, res: Response) => {
           <label style="display:block;color:#888;font-size:12px;margin-bottom:5px">Sizing Mode</label>
           <select id="settingsSizingMode" style="width:100%;background:#222;border:1px solid #444;color:#fff;padding:8px;border-radius:4px">
             <option value="">Use global default</option>
+            <option value="conviction">Conviction (match small, scale large)</option>
             <option value="fixed_dollar">Fixed dollar amount</option>
             <option value="match">Match target size</option>
           </select>
+        </div>
+
+        <div id="copyRatioRow" style="margin-bottom:15px;display:none">
+          <label style="display:block;color:#888;font-size:12px;margin-bottom:5px">Copy Ratio (for trades > $5)</label>
+          <input type="number" id="settingsCopyRatio" step="0.01" min="0" max="1" placeholder="e.g., 0.10 = 10%" style="width:100%;background:#222;border:1px solid #444;color:#fff;padding:8px;border-radius:4px">
+          <div style="font-size:11px;color:#666;margin-top:4px">$1-$5 trades: match 1:1 | >$5 trades: this ratio × target size (min $1, max by Max Cost)</div>
         </div>
 
         <div id="fixedDollarRow" style="margin-bottom:15px;display:none">

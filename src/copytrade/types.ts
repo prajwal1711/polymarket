@@ -62,8 +62,9 @@ export interface CopyTarget {
   // Per-wallet guardrails (null = use global default)
   maxCostPerTrade: number | null;
   maxExposure: number | null;
-  sizingMode: 'fixed_dollar' | 'fixed_shares' | 'proportional' | 'match' | null;
+  sizingMode: 'fixed_dollar' | 'fixed_shares' | 'proportional' | 'match' | 'conviction' | null;
   fixedDollarAmount: number | null;
+  copyRatio: number | null;     // For conviction mode: ratio of target's trade to copy (e.g., 0.1 = 10%)
   minPrice: number | null;
   maxPrice: number | null;
   allowOverdraft: boolean;      // OD facility (default: false)
@@ -188,10 +189,11 @@ export interface CopytradeConfig {
   maxPriceSlippage: number;     // Max price difference from original (e.g., 0.05 = 5%)
 
   // Sizing
-  sizingMode: 'fixed_dollar' | 'fixed_shares' | 'proportional' | 'match';
+  sizingMode: 'fixed_dollar' | 'fixed_shares' | 'proportional' | 'match' | 'conviction';
   fixedDollarAmount?: number;   // For 'fixed_dollar' mode - spend this much per trade
   fixedShares?: number;         // For 'fixed_shares' mode - buy this many shares
   proportionalRatio?: number;   // For 'proportional' mode (e.g., 0.1 = 10% of their size)
+  copyRatio?: number;           // For 'conviction' mode (e.g., 0.1 = 10% of target's $ value)
 
   // Filters
   copySide: 'BUY' | 'SELL' | 'BOTH';
@@ -212,17 +214,18 @@ export interface CopytradeConfig {
 export const DEFAULT_CONFIG: CopytradeConfig = {
   targets: [],
 
-  // Guardrails for $5/trade strategy
-  maxCostPerTrade: 5.50,        // Max ~$5 per trade (with buffer)
-  maxTotalCostPerRun: 25.00,    // Max $25 per run
+  // Guardrails for conviction-based strategy
+  maxCostPerTrade: 10.00,       // Max $10 per trade (cap for large trades)
+  maxTotalCostPerRun: 50.00,    // Max $50 per run
   maxExposurePerTarget: 50.00,  // Max $50 total exposure per trader (open positions)
   maxTradesPerRun: 10,          // Max 10 trades per run
   minTradeSize: 1,              // At least 1 share
   maxPriceSlippage: 0.10,       // 10% max slippage
 
-  // Default sizing - $5 per trade
-  sizingMode: 'fixed_dollar',
-  fixedDollarAmount: 5.00,      // Spend $5 per copied trade
+  // Default sizing - conviction-based
+  sizingMode: 'conviction',
+  copyRatio: 0.10,              // 10% of target's trade value for large trades
+  fixedDollarAmount: 5.00,      // Fallback for fixed_dollar mode
 
   // Filters
   copySide: 'BOTH',             // Copy both buys and sells

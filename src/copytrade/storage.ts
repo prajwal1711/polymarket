@@ -153,9 +153,14 @@ export class CopytradeStorage {
         max_exposure_per_target REAL DEFAULT 50,
         min_price REAL DEFAULT 0.01,
         max_price REAL DEFAULT 0.99,
+        poll_interval INTEGER DEFAULT 10,
         updated_at TEXT DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    // Add poll_interval column if it doesn't exist
+    try {
+      this.db.exec(`ALTER TABLE global_config ADD COLUMN poll_interval INTEGER DEFAULT 10`);
+    } catch (e) { /* column exists */ }
     // Ensure global config row exists
     this.db.exec(`INSERT OR IGNORE INTO global_config (id) VALUES (1)`);
 
@@ -535,6 +540,7 @@ export class CopytradeStorage {
     maxExposurePerTarget: number;
     minPrice: number;
     maxPrice: number;
+    pollInterval: number;
   } {
     const row = this.db.prepare('SELECT * FROM global_config WHERE id = 1').get() as any;
 
@@ -545,6 +551,7 @@ export class CopytradeStorage {
       maxExposurePerTarget: row?.max_exposure_per_target ?? 50,
       minPrice: row?.min_price ?? 0.01,
       maxPrice: row?.max_price ?? 0.99,
+      pollInterval: row?.poll_interval ?? 10,
     };
   }
 
@@ -558,6 +565,7 @@ export class CopytradeStorage {
     maxExposurePerTarget?: number;
     minPrice?: number;
     maxPrice?: number;
+    pollInterval?: number;
   }): void {
     const updates: string[] = [];
     const values: any[] = [];
@@ -585,6 +593,10 @@ export class CopytradeStorage {
     if (config.maxPrice !== undefined) {
       updates.push('max_price = ?');
       values.push(config.maxPrice);
+    }
+    if (config.pollInterval !== undefined) {
+      updates.push('poll_interval = ?');
+      values.push(config.pollInterval);
     }
 
     if (updates.length === 0) return;
@@ -1111,6 +1123,82 @@ export class CopytradeStorage {
       totalPnl: closed.total_pnl,
       winRate,
     };
+  }
+
+  /**
+   * Close a position due to market settlement (resolved market)
+   * Used by reconciliation when position no longer exists on Polymarket
+   */
+  closePositionAsSettled(params: {
+    targetAddress: string;
+    tokenId: string;
+    settlementPrice: number; // 1 if won, 0 if lost
+  }): {
+    success: boolean;
+    position?: { shares: number; avgEntryPrice: number; totalCost: number; pnl: number };
+  } {
+    const existing = this.getOpenPosition(params.targetAddress, params.tokenId);
+
+    if (!existing) {
+      return { success: false };
+    }
+
+    // Calculate exit proceeds: shares * settlement price
+    // If settlement price is 1 (won), we get full share value
+    // If settlement price is 0 (lost), we get nothing
+    const exitProceeds = existing.shares * params.settlementPrice;
+    const pnl = exitProceeds - existing.totalCost;
+
+    this.db.prepare(`
+      UPDATE copied_positions
+      SET status = 'closed',
+          closed_at = ?,
+          exit_price = ?,
+          exit_proceeds = ?,
+          pnl = ?
+      WHERE id = ?
+    `).run(
+      new Date().toISOString(),
+      params.settlementPrice,
+      exitProceeds,
+      pnl,
+      existing.id
+    );
+
+    return {
+      success: true,
+      position: {
+        shares: existing.shares,
+        avgEntryPrice: existing.avgEntryPrice,
+        totalCost: existing.totalCost,
+        pnl,
+      },
+    };
+  }
+
+  /**
+   * Get all open positions with their token IDs for reconciliation
+   */
+  getAllOpenPositionTokenIds(): Array<{
+    targetAddress: string;
+    tokenId: string;
+    conditionId: string;
+    shares: number;
+    totalCost: number;
+  }> {
+    const rows = this.db.prepare(`
+      SELECT target_address, token_id, condition_id, shares, total_cost
+      FROM copied_positions
+      WHERE status = 'open'
+    `).all() as any[];
+
+    return rows.map(row => ({
+      targetAddress: row.target_address,
+      tokenId: row.token_id,
+      conditionId: row.condition_id,
+      shares: row.shares,
+      totalCost: row.total_cost,
+    }));
   }
 
   /**

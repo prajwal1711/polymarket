@@ -331,6 +331,92 @@ app.get('/api/positions/closed', (req: Request, res: Response) => {
   }
 });
 
+// Manually settle a position (mark as won or lost)
+app.post('/api/positions/:id/settle', (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { outcome } = req.body; // 'won' or 'lost'
+
+    if (outcome !== 'won' && outcome !== 'lost') {
+      return res.status(400).json({ error: 'Outcome must be "won" or "lost"' });
+    }
+
+    // Find the position by ID
+    const positions = storage.getOpenPositions();
+    const position = positions.find(p => p.id === id);
+
+    if (!position) {
+      return res.status(404).json({ error: 'Open position not found' });
+    }
+
+    // Settlement price: 1 if won, 0 if lost
+    const settlementPrice = outcome === 'won' ? 1 : 0;
+
+    const result = storage.closePositionAsSettled({
+      targetAddress: position.targetAddress,
+      tokenId: position.tokenId,
+      settlementPrice,
+    });
+
+    if (!result.success) {
+      return res.status(500).json({ error: 'Failed to settle position' });
+    }
+
+    res.json({
+      success: true,
+      outcome,
+      pnl: result.position?.pnl,
+      shares: result.position?.shares,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Manually record a sale (when you sold via Polymarket directly)
+app.post('/api/positions/:id/sold', (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { exitPrice } = req.body; // Price per share you sold at (0.00 - 1.00)
+
+    if (exitPrice === undefined || exitPrice < 0 || exitPrice > 1) {
+      return res.status(400).json({ error: 'Exit price must be between 0 and 1' });
+    }
+
+    // Find the position by ID
+    const positions = storage.getOpenPositions();
+    const position = positions.find(p => p.id === id);
+
+    if (!position) {
+      return res.status(404).json({ error: 'Open position not found' });
+    }
+
+    // Calculate proceeds based on exit price
+    const exitProceeds = position.shares * exitPrice;
+
+    const result = storage.closePosition({
+      targetAddress: position.targetAddress,
+      tokenId: position.tokenId,
+      exitPrice,
+      exitProceeds,
+    });
+
+    if (!result.success) {
+      return res.status(500).json({ error: 'Failed to record sale' });
+    }
+
+    res.json({
+      success: true,
+      exitPrice,
+      exitProceeds,
+      pnl: result.position?.pnl,
+      shares: result.position?.shares,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Get recent copied trades (with target alias)
 app.get('/api/trades', (req: Request, res: Response) => {
   try {
@@ -1123,6 +1209,7 @@ app.get('/', (req: Request, res: Response) => {
             <th>Entry Price</th>
             <th>Cost</th>
             <th>Opened</th>
+            <th>Settle</th>
           </tr>
         </thead>
         <tbody id="positionsTable"></tbody>
@@ -1338,9 +1425,12 @@ app.get('/', (req: Request, res: Response) => {
       const res = await fetch('/api/positions');
       const positions = await res.json();
 
+      // Store for modal access
+      window.allPositions = positions;
+
       const tbody = document.getElementById('positionsTable');
       tbody.innerHTML = positions.length === 0
-        ? '<tr><td colspan="6" style="text-align:center;color:#666">No open positions</td></tr>'
+        ? '<tr><td colspan="7" style="text-align:center;color:#666">No open positions</td></tr>'
         : positions.map(p => \`
           <tr>
             <td style="font-size:12px;color:#fbbf24" title="\${p.targetAddress}">\${p.targetAlias || '-'}</td>
@@ -1349,6 +1439,11 @@ app.get('/', (req: Request, res: Response) => {
             <td>\${formatMoney(p.avgEntryPrice)}</td>
             <td>\${formatMoney(p.totalCost)}</td>
             <td>\${formatDate(p.openedAt)}</td>
+            <td style="white-space:nowrap">
+              <button class="btn small" onclick="showSoldModal('\${p.id}')" title="I sold this manually" style="background:#1e3a5f;color:#60a5fa">Sold</button>
+              <button class="btn small success" onclick="settlePosition('\${p.id}', 'won')" title="Market resolved - I won">Won</button>
+              <button class="btn small danger" onclick="settlePosition('\${p.id}', 'lost')" title="Market resolved - I lost">Lost</button>
+            </td>
           </tr>
         \`).join('');
     }
@@ -1523,6 +1618,121 @@ app.get('/', (req: Request, res: Response) => {
         document.getElementById('reconcileStatus').innerHTML = '<span style="color:#ef4444">Error: ' + e.message + '</span>';
       }
     }
+
+    async function settlePosition(positionId, outcome) {
+      const action = outcome === 'won' ? 'WON (receive $1/share)' : 'LOST (receive $0)';
+      if (!confirm(\`Mark this position as \${action}? This cannot be undone.\`)) return;
+
+      try {
+        const res = await fetch(\`/api/positions/\${encodeURIComponent(positionId)}/settle\`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ outcome })
+        });
+
+        const data = await res.json();
+
+        if (!res.ok || data.error) {
+          alert('Error: ' + (data.error || 'Failed to settle'));
+          return;
+        }
+
+        const pnlText = data.pnl >= 0 ? '+$' + data.pnl.toFixed(2) : '-$' + Math.abs(data.pnl).toFixed(2);
+        alert(\`Position settled as \${outcome.toUpperCase()}. PnL: \${pnlText}\`);
+        await refreshAll();
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+    }
+
+    // ============ Sold Modal Functions ============
+    let currentSoldPositionId = null;
+
+    function showSoldModal(positionId) {
+      currentSoldPositionId = positionId;
+      const position = window.allPositions?.find(p => p.id === positionId);
+      if (!position) {
+        alert('Position not found');
+        return;
+      }
+
+      const modal = document.getElementById('soldModal');
+      document.getElementById('soldPositionInfo').innerHTML = \`
+        <div style="margin-bottom:10px">
+          <strong>\${position.marketTitle || 'Unknown Market'}</strong>
+        </div>
+        <div style="font-size:12px;color:#888">
+          Shares: \${position.shares.toFixed(2)} | Entry: $\${position.avgEntryPrice.toFixed(4)} | Cost: $\${position.totalCost.toFixed(2)}
+        </div>
+      \`;
+      document.getElementById('soldExitPrice').value = '';
+      document.getElementById('soldProceeds').textContent = '-';
+      document.getElementById('soldPnl').textContent = '-';
+      document.getElementById('soldExitPrice').focus();
+
+      modal.classList.add('active');
+    }
+
+    function closeSoldModal() {
+      document.getElementById('soldModal').classList.remove('active');
+      currentSoldPositionId = null;
+    }
+
+    function updateSoldPreview() {
+      const position = window.allPositions?.find(p => p.id === currentSoldPositionId);
+      if (!position) return;
+
+      const exitPrice = parseFloat(document.getElementById('soldExitPrice').value);
+      if (isNaN(exitPrice) || exitPrice < 0 || exitPrice > 1) {
+        document.getElementById('soldProceeds').textContent = '-';
+        document.getElementById('soldPnl').textContent = '-';
+        return;
+      }
+
+      const proceeds = position.shares * exitPrice;
+      const pnl = proceeds - position.totalCost;
+
+      document.getElementById('soldProceeds').textContent = '$' + proceeds.toFixed(2);
+      document.getElementById('soldPnl').textContent = (pnl >= 0 ? '+$' : '-$') + Math.abs(pnl).toFixed(2);
+      document.getElementById('soldPnl').style.color = pnl >= 0 ? '#22c55e' : '#ef4444';
+    }
+
+    async function submitSold() {
+      if (!currentSoldPositionId) return;
+
+      const exitPrice = parseFloat(document.getElementById('soldExitPrice').value);
+      if (isNaN(exitPrice) || exitPrice < 0 || exitPrice > 1) {
+        alert('Please enter a valid exit price (0.00 - 1.00)');
+        return;
+      }
+
+      try {
+        const res = await fetch(\`/api/positions/\${encodeURIComponent(currentSoldPositionId)}/sold\`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ exitPrice })
+        });
+
+        const data = await res.json();
+
+        if (!res.ok || data.error) {
+          alert('Error: ' + (data.error || 'Failed to record sale'));
+          return;
+        }
+
+        const pnlText = data.pnl >= 0 ? '+$' + data.pnl.toFixed(2) : '-$' + Math.abs(data.pnl).toFixed(2);
+        alert(\`Sale recorded. Proceeds: $\${data.exitProceeds.toFixed(2)}, PnL: \${pnlText}\`);
+        closeSoldModal();
+        await refreshAll();
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+    }
+
+    // Close sold modal on overlay click
+    document.getElementById('soldModal')?.addEventListener('click', function(e) {
+      if (e.target === this) closeSoldModal();
+    });
 
     async function toggleTarget(address, enabled) {
       try {
@@ -1914,6 +2124,7 @@ app.get('/', (req: Request, res: Response) => {
         document.getElementById('globalMaxExposure').value = config.maxExposurePerTarget || 50;
         document.getElementById('globalMinPrice').value = config.minPrice || 0.01;
         document.getElementById('globalMaxPrice').value = config.maxPrice || 0.99;
+        document.getElementById('globalPollInterval').value = config.pollInterval || 10;
 
       } catch (e) {
         alert('Error loading global config: ' + e.message);
@@ -1935,6 +2146,7 @@ app.get('/', (req: Request, res: Response) => {
         maxExposurePerTarget: parseFloat(document.getElementById('globalMaxExposure').value) || 50,
         minPrice: parseFloat(document.getElementById('globalMinPrice').value) || 0.01,
         maxPrice: parseFloat(document.getElementById('globalMaxPrice').value) || 0.99,
+        pollInterval: parseInt(document.getElementById('globalPollInterval').value) || 10,
       };
 
       try {
@@ -1972,6 +2184,40 @@ app.get('/', (req: Request, res: Response) => {
   <!-- Trade Modal Overlay -->
   <div id="tradeModal" class="modal-overlay">
     <div class="modal" id="modalContent"></div>
+  </div>
+
+  <!-- Sold Modal Overlay -->
+  <div id="soldModal" class="modal-overlay">
+    <div class="modal" style="max-width:420px">
+      <div class="modal-header">
+        <h3>Record Manual Sale</h3>
+        <button class="modal-close" onclick="closeSoldModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="soldPositionInfo" style="background:#222;padding:12px;border-radius:6px;margin-bottom:15px"></div>
+
+        <div style="margin-bottom:15px">
+          <label style="display:block;color:#888;font-size:12px;margin-bottom:5px">Exit Price (per share)</label>
+          <input type="number" id="soldExitPrice" step="0.01" min="0" max="1" placeholder="0.00 - 1.00"
+                 oninput="updateSoldPreview()"
+                 style="width:100%;background:#222;border:1px solid #444;color:#fff;padding:12px;border-radius:4px;font-size:18px">
+          <div style="font-size:11px;color:#666;margin-top:4px">Enter the price you sold at (e.g., 0.65 for 65 cents)</div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:15px;margin-bottom:20px;background:#1a1a1a;padding:12px;border-radius:6px">
+          <div style="text-align:center">
+            <div style="color:#888;font-size:11px;margin-bottom:4px">PROCEEDS</div>
+            <div id="soldProceeds" style="font-size:18px;font-weight:bold;color:#fff">-</div>
+          </div>
+          <div style="text-align:center">
+            <div style="color:#888;font-size:11px;margin-bottom:4px">P&L</div>
+            <div id="soldPnl" style="font-size:18px;font-weight:bold">-</div>
+          </div>
+        </div>
+
+        <button class="btn" style="width:100%;padding:12px;background:#1e3a5f;color:#60a5fa" onclick="submitSold()">Record Sale</button>
+      </div>
+    </div>
   </div>
 
   <!-- Funding Modal Overlay -->
@@ -2091,9 +2337,16 @@ app.get('/', (req: Request, res: Response) => {
           </div>
         </div>
 
-        <div style="margin-bottom:15px">
-          <label style="display:block;color:#888;font-size:12px;margin-bottom:5px">Max Exposure Per Target ($)</label>
-          <input type="number" id="globalMaxExposure" step="5" min="1" placeholder="50" style="width:100%;background:#222;border:1px solid #444;color:#fff;padding:8px;border-radius:4px">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:15px;margin-bottom:15px">
+          <div>
+            <label style="display:block;color:#888;font-size:12px;margin-bottom:5px">Max Exposure Per Target ($)</label>
+            <input type="number" id="globalMaxExposure" step="5" min="1" placeholder="50" style="width:100%;background:#222;border:1px solid #444;color:#fff;padding:8px;border-radius:4px">
+          </div>
+          <div>
+            <label style="display:block;color:#888;font-size:12px;margin-bottom:5px">Poll Interval (seconds)</label>
+            <input type="number" id="globalPollInterval" step="1" min="1" max="60" placeholder="10" style="width:100%;background:#222;border:1px solid #444;color:#fff;padding:8px;border-radius:4px">
+            <div style="font-size:11px;color:#ef4444;margin-top:2px">Requires daemon restart</div>
+          </div>
         </div>
 
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:15px;margin-bottom:20px">

@@ -23,7 +23,7 @@ ssh -i $KEY $SERVER "cd $REMOTE_DIR && npm install && npm run build"
 # Restart services if --restart flag is passed
 if [ "$1" == "--restart" ]; then
   echo "3. Restarting services..."
-  ssh -i $KEY $SERVER "pkill -f 'dist/copytrade/daemon.js' || true; pkill -f 'dist/copytrade/dashboard.js' || true; sleep 1; cd $REMOTE_DIR && nohup node dist/copytrade/dashboard.js > /tmp/dashboard.log 2>&1 & nohup node dist/copytrade/daemon.js > /tmp/daemon.log 2>&1 &"
+  ssh -i $KEY $SERVER "pkill -f 'dist/copytrade/daemon.js' || true; pkill -f 'dist/copytrade/dashboard.js' || true; sleep 1; cd $REMOTE_DIR && nohup node -r dotenv/config dist/copytrade/dashboard.js > /tmp/dashboard.log 2>&1 & nohup node -r dotenv/config dist/copytrade/daemon.js > /tmp/daemon.log 2>&1 &"
   echo "Services restarted!"
 else
   echo "3. Skipping restart (use --restart to restart services)"

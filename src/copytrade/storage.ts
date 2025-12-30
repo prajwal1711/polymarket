@@ -6,7 +6,7 @@ import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as path from 'path';
 import { v4 as uuidv4 } from 'uuid';
-import { CopiedTrade, CopytradeRun, CopyTarget, SubledgerTransaction, WalletStats, OperatingAccount } from './types';
+import { CopiedTrade, CopytradeRun, CopyTarget, SubledgerTransaction, WalletStats, OperatingAccount, PendingOrder, FillResult } from './types';
 
 const DB_PATH = path.join(process.cwd(), 'data', 'markets.db');
 
@@ -195,6 +195,33 @@ export class CopytradeStorage {
       )
     `);
 
+    // Fill tracking columns for copied_trades
+    try {
+      this.db.exec(`ALTER TABLE copied_trades ADD COLUMN fill_price REAL`);
+    } catch (e) { /* column exists */ }
+    try {
+      this.db.exec(`ALTER TABLE copied_trades ADD COLUMN fill_size REAL`);
+    } catch (e) { /* column exists */ }
+    try {
+      this.db.exec(`ALTER TABLE copied_trades ADD COLUMN filled_at TEXT`);
+    } catch (e) { /* column exists */ }
+
+    // Pending orders table - tracks orders awaiting fill confirmation
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS pending_orders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_id TEXT UNIQUE NOT NULL,
+        copied_trade_id TEXT NOT NULL,
+        token_id TEXT NOT NULL,
+        condition_id TEXT,
+        target_address TEXT,
+        side TEXT NOT NULL,
+        expected_size REAL NOT NULL,
+        expected_price REAL NOT NULL,
+        placed_at TEXT NOT NULL
+      )
+    `);
+
     // Indexes
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_copied_trades_original ON copied_trades(original_trade_id);
@@ -203,6 +230,7 @@ export class CopytradeStorage {
       CREATE INDEX IF NOT EXISTS idx_copytrade_runs_target ON copytrade_runs(target_address);
       CREATE INDEX IF NOT EXISTS idx_copied_positions_token ON copied_positions(token_id);
       CREATE INDEX IF NOT EXISTS idx_copied_positions_status ON copied_positions(status);
+      CREATE INDEX IF NOT EXISTS idx_pending_orders_order_id ON pending_orders(order_id);
     `);
   }
 
@@ -780,6 +808,9 @@ export class CopytradeStorage {
       skipReason: row.skip_reason,
       createdAt: row.created_at,
       executedAt: row.executed_at,
+      fillPrice: row.fill_price,
+      fillSize: row.fill_size,
+      filledAt: row.filled_at,
       marketTitle: row.market_title,
       marketSlug: row.market_slug,
       eventSlug: row.event_slug,
@@ -1199,6 +1230,139 @@ export class CopytradeStorage {
       shares: row.shares,
       totalCost: row.total_cost,
     }));
+  }
+
+  // ============ Pending Orders (Fill Tracking) ============
+
+  /**
+   * Save a pending order awaiting fill confirmation
+   */
+  savePendingOrder(order: {
+    orderId: string;
+    copiedTradeId: string;
+    tokenId: string;
+    conditionId: string;
+    targetAddress: string;
+    side: 'BUY' | 'SELL';
+    expectedSize: number;
+    expectedPrice: number;
+  }): void {
+    this.db.prepare(`
+      INSERT INTO pending_orders (order_id, copied_trade_id, token_id, condition_id, target_address, side, expected_size, expected_price, placed_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      order.orderId,
+      order.copiedTradeId,
+      order.tokenId,
+      order.conditionId,
+      order.targetAddress.toLowerCase(),
+      order.side,
+      order.expectedSize,
+      order.expectedPrice,
+      new Date().toISOString()
+    );
+  }
+
+  /**
+   * Get all pending orders awaiting fill confirmation
+   */
+  getPendingOrders(): PendingOrder[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM pending_orders ORDER BY placed_at ASC
+    `).all() as any[];
+
+    return rows.map(row => ({
+      id: row.id,
+      orderId: row.order_id,
+      copiedTradeId: row.copied_trade_id,
+      tokenId: row.token_id,
+      conditionId: row.condition_id || '',
+      targetAddress: row.target_address || '',
+      side: row.side as 'BUY' | 'SELL',
+      expectedSize: row.expected_size,
+      expectedPrice: row.expected_price,
+      placedAt: row.placed_at,
+    }));
+  }
+
+  /**
+   * Remove a pending order (when filled or cancelled)
+   */
+  removePendingOrder(orderId: string): void {
+    this.db.prepare(`
+      DELETE FROM pending_orders WHERE order_id = ?
+    `).run(orderId);
+  }
+
+  /**
+   * Update a copied trade as filled with actual fill data
+   */
+  updateTradeAsFilled(fill: FillResult): void {
+    this.db.prepare(`
+      UPDATE copied_trades
+      SET status = 'filled',
+          fill_price = ?,
+          fill_size = ?,
+          filled_at = ?
+      WHERE id = ?
+    `).run(fill.fillPrice, fill.fillSize, fill.filledAt, fill.copiedTradeId);
+  }
+
+  /**
+   * Get pending order count
+   */
+  getPendingOrderCount(): number {
+    const row = this.db.prepare(`
+      SELECT COUNT(*) as count FROM pending_orders
+    `).get() as any;
+    return row?.count || 0;
+  }
+
+  /**
+   * Get the copied trade ID for a pending order
+   */
+  getCopiedTradeIdForOrder(orderId: string): number | null {
+    const row = this.db.prepare(`
+      SELECT copied_trade_id FROM pending_orders WHERE order_id = ?
+    `).get(orderId) as any;
+    return row?.copied_trade_id || null;
+  }
+
+  /**
+   * Get copied trade by ID (numeric)
+   */
+  getCopiedTradeById(id: number): CopiedTrade | null {
+    const row = this.db.prepare(`
+      SELECT * FROM copied_trades WHERE rowid = ? OR id = ?
+    `).get(id, id.toString()) as any;
+
+    if (!row) return null;
+
+    return {
+      id: row.id,
+      originalTradeId: row.original_trade_id,
+      targetAddress: row.target_address,
+      tokenId: row.token_id,
+      conditionId: row.condition_id,
+      side: row.side as 'BUY' | 'SELL',
+      originalPrice: row.original_price,
+      originalSize: row.original_size,
+      copyPrice: row.copy_price,
+      copySize: row.copy_size,
+      copyCost: row.copy_cost,
+      orderId: row.order_id,
+      status: row.status as CopiedTrade['status'],
+      skipReason: row.skip_reason,
+      createdAt: row.created_at,
+      executedAt: row.executed_at,
+      fillPrice: row.fill_price,
+      fillSize: row.fill_size,
+      filledAt: row.filled_at,
+      marketTitle: row.market_title,
+      marketSlug: row.market_slug,
+      eventSlug: row.event_slug,
+      ruleEvaluation: row.rule_evaluation ? JSON.parse(row.rule_evaluation) : null,
+    };
   }
 
   /**

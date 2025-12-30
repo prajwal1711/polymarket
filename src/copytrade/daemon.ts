@@ -43,6 +43,9 @@ interface DaemonStats {
   reconcileCount: number;
   positionsSettled: number;
   lastReconcileTime: Date | null;
+  // Fill tracking stats
+  pendingOrders: number;
+  ordersFilled: number;
 }
 
 function loadCredentials(): {
@@ -119,6 +122,9 @@ function printStatus(stats: DaemonStats, targets: string[]): void {
   console.log('├─────────────────────────────────────────────────────────┤');
   console.log(`│  Reconciles:    ${stats.reconcileCount}`.padEnd(58) + '│');
   console.log(`│  Settled:       ${stats.positionsSettled} positions`.padEnd(58) + '│');
+  console.log('├─────────────────────────────────────────────────────────┤');
+  console.log(`│  Pending orders: ${stats.pendingOrders}`.padEnd(58) + '│');
+  console.log(`│  Orders filled:  ${stats.ordersFilled}`.padEnd(58) + '│');
   console.log('└─────────────────────────────────────────────────────────┘');
   console.log('');
 }
@@ -193,6 +199,8 @@ async function runDaemon(): Promise<void> {
     reconcileCount: 0,
     positionsSettled: 0,
     lastReconcileTime: null,
+    pendingOrders: 0,
+    ordersFilled: 0,
   };
 
   // Print initial status
@@ -313,6 +321,22 @@ async function runDaemon(): Promise<void> {
         if (error.message?.includes('blocked') || error.message?.includes('403')) {
           console.error('  ⚠️  Cloudflare block detected - may need proxy');
         }
+      }
+    }
+
+    // Check for order fills (only in live mode)
+    if (!DRY_RUN) {
+      try {
+        const fills = await copier.checkPendingOrders();
+        if (fills.length > 0) {
+          console.log(`\nProcessing ${fills.length} fill(s)...`);
+          await copier.processFills(fills);
+          stats.ordersFilled += fills.length;
+        }
+        // Update pending orders count
+        stats.pendingOrders = storage.getPendingOrderCount();
+      } catch (error: any) {
+        console.error(`  Error checking fills: ${error.message}`);
       }
     }
 

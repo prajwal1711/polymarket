@@ -10,7 +10,7 @@ import axios from 'axios';
 
 import { PolymarketDataApi, DataApiTrade } from './data-api';
 import { CopytradeStorage } from './storage';
-import { CopiedTrade, CopytradeConfig, CopytradeRun, DEFAULT_CONFIG, GuardrailEvaluation, RuleEvaluation } from './types';
+import { CopiedTrade, CopytradeConfig, CopytradeRun, DEFAULT_CONFIG, GuardrailEvaluation, RuleEvaluation, PendingOrder, FillResult } from './types';
 
 const CLOB_HOST = 'https://clob.polymarket.com';
 
@@ -340,23 +340,33 @@ export class Copier {
             } else {
               // Actually place the SELL order
               const result = await this.placeSellOrder(trade.asset, sellSize, trade.price);
-              if (result.success) {
-                // Close the position in our tracking
-                this.storage.closePosition({
-                  targetAddress,
-                  tokenId: trade.asset,
-                  exitPrice: trade.price,
-                  exitProceeds: sellProceeds,
-                });
-
-                tradeRecord.status = 'placed';
-                tradeRecord.orderId = result.orderId || null;
+              if (result.success && result.orderId) {
+                // Save trade record first
+                tradeRecord.status = 'pending';  // Will be 'filled' when confirmed
+                tradeRecord.orderId = result.orderId;
                 tradeRecord.executedAt = new Date().toISOString();
                 fullEvaluation.outcome = 'placed';
+                this.storage.saveCopiedTrade(tradeRecord);
+
+                // Save to pending_orders for fill tracking
+                // Position will be closed when fill is confirmed
+                this.storage.savePendingOrder({
+                  orderId: result.orderId,
+                  copiedTradeId: tradeRecord.id,
+                  tokenId: trade.asset,
+                  conditionId: trade.conditionId,
+                  targetAddress: targetAddress,
+                  side: 'SELL',
+                  expectedSize: sellSize,
+                  expectedPrice: trade.price,
+                });
+
                 tradesCopiedCount++;
                 run.tradesCopied++;
                 const pnlStr = pnl >= 0 ? `+$${pnl.toFixed(2)}` : `-$${Math.abs(pnl).toFixed(2)}`;
-                console.log(`  SOLD: ${sellSize.toFixed(1)} shares @ $${trade.price} | PnL: ${pnlStr}`);
+                console.log(`  SELL ORDER PLACED: ${sellSize.toFixed(1)} shares @ $${trade.price} | Expected PnL: ${pnlStr} [awaiting fill]`);
+                copiedTrades.push(tradeRecord);
+                continue;  // Skip the saveCopiedTrade below since we saved above
               } else {
                 tradeRecord.status = 'failed';
                 tradeRecord.skipReason = result.error || null;
@@ -495,27 +505,34 @@ export class Copier {
           } else {
             // Actually place the order
             const result = await this.placeOrder(trade, copySize);
-            if (result.success) {
-              // Track the position
-              this.storage.openOrAddPosition({
-                id: tradeRecord.id,
-                targetAddress,
-                tokenId: trade.asset,
-                conditionId: trade.conditionId,
-                shares: copySize,
-                price: trade.price,
-                cost: copyCost,
-              });
-
-              tradeRecord.status = 'placed';
-              tradeRecord.orderId = result.orderId || null;
+            if (result.success && result.orderId) {
+              // Save trade record first to get the ID
+              tradeRecord.status = 'pending';  // Will be 'filled' when confirmed
+              tradeRecord.orderId = result.orderId;
               tradeRecord.executedAt = new Date().toISOString();
               fullEvaluation.outcome = 'placed';
+              this.storage.saveCopiedTrade(tradeRecord);
+
+              // Save to pending_orders for fill tracking
+              // Position will be created when fill is confirmed
+              this.storage.savePendingOrder({
+                orderId: result.orderId,
+                copiedTradeId: tradeRecord.id,
+                tokenId: trade.asset,
+                conditionId: trade.conditionId,
+                targetAddress: targetAddress,
+                side: 'BUY',
+                expectedSize: copySize,
+                expectedPrice: trade.price,
+              });
+
               totalCostSoFar += copyCost;
               tradesCopiedCount++;
               run.tradesCopied++;
               run.totalCost += copyCost;
-              console.log(`  BOUGHT: ${copySize} shares @ $${trade.price} = $${copyCost.toFixed(2)} (Order: ${result.orderId?.substring(0, 12)}...)`);
+              console.log(`  ORDER PLACED: ${copySize} shares @ $${trade.price} = $${copyCost.toFixed(2)} (Order: ${result.orderId?.substring(0, 12)}...) [awaiting fill]`);
+              copiedTrades.push(tradeRecord);
+              continue;  // Skip the saveCopiedTrade below since we saved above
             } else {
               tradeRecord.status = 'failed';
               tradeRecord.skipReason = result.error || null;
@@ -774,6 +791,9 @@ export class Copier {
       skipReason: null,
       createdAt: new Date().toISOString(),
       executedAt: null,
+      fillPrice: null,
+      fillSize: null,
+      filledAt: null,
       marketTitle: trade.title || null,
       marketSlug: trade.slug || null,
       eventSlug: trade.eventSlug || null,
@@ -925,6 +945,135 @@ export class Copier {
    */
   updateConfig(updates: Partial<CopytradeConfig>): void {
     this.config = { ...this.config, ...updates };
+  }
+
+  /**
+   * Check pending orders for fills and process them
+   * Returns list of orders that were confirmed as filled
+   */
+  async checkPendingOrders(): Promise<FillResult[]> {
+    const pendingOrders = this.storage.getPendingOrders();
+    if (pendingOrders.length === 0) {
+      return [];
+    }
+
+    if (!this.l2Client) {
+      console.log('CLOB client not initialized - cannot check fills');
+      return [];
+    }
+
+    console.log(`\nChecking ${pendingOrders.length} pending order(s) for fills...`);
+
+    const fills: FillResult[] = [];
+
+    try {
+      // Get our filled trades from the CLOB
+      const filledTrades = await this.l2Client.getTrades();
+      const openOrders = await this.l2Client.getOpenOrders();
+
+      // Create lookup maps
+      const filledOrderIds = new Set<string>();
+      const tradesByOrderId = new Map<string, any>();
+
+      if (Array.isArray(filledTrades)) {
+        for (const trade of filledTrades) {
+          const t = trade as any;
+          const orderId = t.order_id || t.orderId || t.taker_order_id;
+          if (orderId) {
+            filledOrderIds.add(orderId);
+            tradesByOrderId.set(orderId, t);
+          }
+        }
+      }
+
+      const openOrderIds = new Set<string>();
+      if (Array.isArray(openOrders)) {
+        for (const order of openOrders) {
+          const o = order as any;
+          const orderId = o.id || o.order_id || o.orderId;
+          if (orderId) {
+            openOrderIds.add(orderId);
+          }
+        }
+      }
+
+      // Check each pending order
+      for (const pending of pendingOrders) {
+        // Check if the order is in our filled trades
+        if (filledOrderIds.has(pending.orderId)) {
+          const trade = tradesByOrderId.get(pending.orderId);
+          const fillPrice = parseFloat(trade?.price) || pending.expectedPrice;
+          const fillSize = parseFloat(trade?.size) || pending.expectedSize;
+
+          const fill: FillResult = {
+            orderId: pending.orderId,
+            copiedTradeId: pending.copiedTradeId,
+            tokenId: pending.tokenId,
+            conditionId: pending.conditionId,
+            targetAddress: pending.targetAddress,
+            side: pending.side,
+            fillPrice,
+            fillSize,
+            filledAt: new Date().toISOString(),
+          };
+
+          fills.push(fill);
+          console.log(`  FILLED: ${pending.side} ${fillSize} shares @ $${fillPrice.toFixed(4)} (Order: ${pending.orderId.substring(0, 12)}...)`);
+        } else if (!openOrderIds.has(pending.orderId)) {
+          // Order is not in open orders and not in filled trades
+          // It might have been filled recently but not yet in getTrades response
+          // Or it could be cancelled - for now we'll leave it pending
+          console.log(`  PENDING: Order ${pending.orderId.substring(0, 12)}... (not yet filled or confirmed)`);
+        } else {
+          // Order is still open on the book
+          console.log(`  OPEN: Order ${pending.orderId.substring(0, 12)}... still on order book`);
+        }
+      }
+
+    } catch (error: any) {
+      console.error(`Error checking pending orders: ${error.message}`);
+    }
+
+    return fills;
+  }
+
+  /**
+   * Process confirmed fills - update trades and create/close positions
+   */
+  async processFills(fills: FillResult[]): Promise<void> {
+    for (const fill of fills) {
+      // Update the copied_trade status to 'filled'
+      this.storage.updateTradeAsFilled(fill);
+
+      if (fill.side === 'BUY') {
+        // Open/add to position
+        this.storage.openOrAddPosition({
+          id: fill.copiedTradeId,
+          targetAddress: fill.targetAddress,
+          tokenId: fill.tokenId,
+          conditionId: fill.conditionId,
+          shares: fill.fillSize,
+          price: fill.fillPrice,
+          cost: fill.fillSize * fill.fillPrice,
+        });
+        console.log(`  Position opened: ${fill.fillSize} shares @ $${fill.fillPrice.toFixed(4)}`);
+      } else {
+        // Close position
+        const result = this.storage.closePosition({
+          targetAddress: fill.targetAddress,
+          tokenId: fill.tokenId,
+          exitPrice: fill.fillPrice,
+          exitProceeds: fill.fillSize * fill.fillPrice,
+        });
+        if (result.success && result.position) {
+          const pnlStr = result.position.pnl >= 0 ? `+$${result.position.pnl.toFixed(2)}` : `-$${Math.abs(result.position.pnl).toFixed(2)}`;
+          console.log(`  Position closed: PnL ${pnlStr}`);
+        }
+      }
+
+      // Remove from pending orders
+      this.storage.removePendingOrder(fill.orderId);
+    }
   }
 
   /**

@@ -156,6 +156,10 @@ export interface CopiedTrade {
   skipReason: string | null;
   createdAt: string;
   executedAt: string | null;
+  // Fill tracking (populated when order fills)
+  fillPrice: number | null;
+  fillSize: number | null;
+  filledAt: string | null;
   marketTitle: string | null;
   marketSlug: string | null;
   eventSlug: string | null;
@@ -209,6 +213,33 @@ export interface CopytradeConfig {
   // Safety
   requireConfirmation: boolean; // Require CONFIRM env var
   dryRun: boolean;              // Don't actually place orders
+}
+
+// Pending order awaiting fill confirmation
+export interface PendingOrder {
+  id: number;
+  orderId: string;
+  copiedTradeId: string;
+  tokenId: string;
+  conditionId: string;
+  targetAddress: string;
+  side: 'BUY' | 'SELL';
+  expectedSize: number;
+  expectedPrice: number;
+  placedAt: string;
+}
+
+// Result from fill checking
+export interface FillResult {
+  orderId: string;
+  copiedTradeId: string;
+  tokenId: string;
+  conditionId: string;
+  targetAddress: string;
+  side: 'BUY' | 'SELL';
+  fillPrice: number;
+  fillSize: number;
+  filledAt: string;
 }
 
 // Default configuration

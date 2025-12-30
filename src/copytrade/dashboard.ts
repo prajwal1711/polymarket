@@ -246,6 +246,7 @@ app.get('/api/summary', (req: Request, res: Response) => {
     const stats = storage.getStats();
     const openPositions = storage.getOpenPositions();
     const targets = storage.getTargets(false);
+    const pendingOrders = storage.getPendingOrderCount();
 
     // Calculate total exposure
     const totalExposure = openPositions.reduce((sum, p) => sum + p.totalCost, 0);
@@ -266,6 +267,7 @@ app.get('/api/summary', (req: Request, res: Response) => {
         totalRuns: stats.totalRuns,
         totalTradesCopied: stats.totalTradesCopied,
         totalCost: stats.totalCost,
+        pendingOrders: pendingOrders,
       },
       targets: {
         total: targets.length,
@@ -893,8 +895,10 @@ app.get('/', (req: Request, res: Response) => {
     .badge.sell { background: #ef444433; color: #ef4444; }
     .badge.open { background: #3b82f633; color: #3b82f6; }
     .badge.closed { background: #6b728033; color: #9ca3af; }
+    .badge.pending { background: #f59e0b33; color: #f59e0b; }
     .badge.placed { background: #22c55e33; color: #22c55e; }
-    .badge.skipped { background: #f59e0b33; color: #f59e0b; }
+    .badge.filled { background: #22c55e33; color: #22c55e; }
+    .badge.skipped { background: #6b728033; color: #9ca3af; }
     .badge.failed { background: #ef444433; color: #ef4444; }
     .badge.enabled { background: #22c55e33; color: #22c55e; }
     .badge.disabled { background: #6b728033; color: #9ca3af; }
@@ -1102,6 +1106,10 @@ app.get('/', (req: Request, res: Response) => {
         <div class="stat">
           <div class="stat-value" id="tradesCopied">0</div>
           <div class="stat-label">Trades Copied</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" id="pendingOrders">0</div>
+          <div class="stat-label">Pending Orders</div>
         </div>
         <div class="stat">
           <div class="stat-value" id="totalRuns">0</div>
@@ -1416,6 +1424,7 @@ app.get('/', (req: Request, res: Response) => {
 
       document.getElementById('winRate').textContent = data.positions.winRate.toFixed(1) + '%';
       document.getElementById('tradesCopied').textContent = data.activity.totalTradesCopied;
+      document.getElementById('pendingOrders').textContent = data.activity.pendingOrders || 0;
       document.getElementById('totalRuns').textContent = data.activity.totalRuns;
       document.getElementById('targetsEnabled').textContent = data.targets.enabled;
       document.getElementById('targetsTotal').textContent = data.targets.total;

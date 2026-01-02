@@ -1366,6 +1366,30 @@ export class CopytradeStorage {
   }
 
   /**
+   * Get timeout stats (cancelled orders and market sells)
+   */
+  getTimeoutStats(): {
+    cancelledOrders: number;
+    cancelledBuys: number;
+    cancelledSells: number;
+  } {
+    const row = this.db.prepare(`
+      SELECT
+        COUNT(*) as total,
+        SUM(CASE WHEN side = 'BUY' THEN 1 ELSE 0 END) as buys,
+        SUM(CASE WHEN side = 'SELL' THEN 1 ELSE 0 END) as sells
+      FROM copied_trades
+      WHERE status = 'cancelled'
+    `).get() as any;
+
+    return {
+      cancelledOrders: row?.total || 0,
+      cancelledBuys: row?.buys || 0,
+      cancelledSells: row?.sells || 0,
+    };
+  }
+
+  /**
    * Close the database connection
    */
   close(): void {

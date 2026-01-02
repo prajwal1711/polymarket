@@ -27,6 +27,8 @@ const POLL_INTERVAL_SEC = parseInt(process.env.POLL_INTERVAL || '10', 10); // De
 const DRY_RUN = process.argv.includes('--dry-run');
 const MAX_TRADE_AGE_MIN = parseInt(process.env.MAX_TRADE_AGE || '60', 10); // Default: 60 minutes
 const RECONCILE_INTERVAL_SEC = parseInt(process.env.RECONCILE_INTERVAL || '300', 10); // Default: 5 minutes
+const BUY_ORDER_TIMEOUT_SEC = parseInt(process.env.BUY_ORDER_TIMEOUT || '90', 10); // Default: 90 seconds
+const SELL_ORDER_TIMEOUT_SEC = parseInt(process.env.SELL_ORDER_TIMEOUT || '300', 10); // Default: 5 minutes
 
 interface DaemonStats {
   startTime: Date;
@@ -46,6 +48,9 @@ interface DaemonStats {
   // Fill tracking stats
   pendingOrders: number;
   ordersFilled: number;
+  // Timeout stats
+  ordersTimedOut: number;
+  marketSellsPlaced: number;
 }
 
 function loadCredentials(): {
@@ -109,6 +114,8 @@ function printStatus(stats: DaemonStats, targets: string[]): void {
   console.log(`│  Poll interval: ${POLL_INTERVAL_SEC} seconds`.padEnd(58) + '│');
   console.log(`│  Reconcile:     every ${RECONCILE_INTERVAL_SEC} seconds`.padEnd(58) + '│');
   console.log(`│  Max trade age: ${MAX_TRADE_AGE_MIN} minutes`.padEnd(58) + '│');
+  console.log(`│  BUY timeout:   ${BUY_ORDER_TIMEOUT_SEC} seconds`.padEnd(58) + '│');
+  console.log(`│  SELL timeout:  ${SELL_ORDER_TIMEOUT_SEC} seconds`.padEnd(58) + '│');
   console.log(`│  Targets:       ${targets.length}`.padEnd(58) + '│');
   console.log('├─────────────────────────────────────────────────────────┤');
   console.log(`│  Uptime:        ${formatUptime(stats.startTime)}`.padEnd(58) + '│');
@@ -125,6 +132,8 @@ function printStatus(stats: DaemonStats, targets: string[]): void {
   console.log('├─────────────────────────────────────────────────────────┤');
   console.log(`│  Pending orders: ${stats.pendingOrders}`.padEnd(58) + '│');
   console.log(`│  Orders filled:  ${stats.ordersFilled}`.padEnd(58) + '│');
+  console.log(`│  Timed out:      ${stats.ordersTimedOut}`.padEnd(58) + '│');
+  console.log(`│  Market sells:   ${stats.marketSellsPlaced}`.padEnd(58) + '│');
   console.log('└─────────────────────────────────────────────────────────┘');
   console.log('');
 }
@@ -158,6 +167,8 @@ async function runDaemon(): Promise<void> {
     dryRun: DRY_RUN,
     maxTradeAgeMs: MAX_TRADE_AGE_MIN * 60 * 1000,
     pollIntervalMs: POLL_INTERVAL_SEC * 1000,
+    buyOrderTimeoutSec: BUY_ORDER_TIMEOUT_SEC,
+    sellOrderTimeoutSec: SELL_ORDER_TIMEOUT_SEC,
   };
 
   // Initialize copier
@@ -201,6 +212,8 @@ async function runDaemon(): Promise<void> {
     lastReconcileTime: null,
     pendingOrders: 0,
     ordersFilled: 0,
+    ordersTimedOut: 0,
+    marketSellsPlaced: 0,
   };
 
   // Print initial status
@@ -324,14 +337,19 @@ async function runDaemon(): Promise<void> {
       }
     }
 
-    // Check for order fills (only in live mode)
+    // Check for order fills and timeouts (only in live mode)
     if (!DRY_RUN) {
       try {
-        const fills = await copier.checkPendingOrders();
+        const { fills, timeouts } = await copier.checkPendingOrders();
         if (fills.length > 0) {
           console.log(`\nProcessing ${fills.length} fill(s)...`);
           await copier.processFills(fills);
           stats.ordersFilled += fills.length;
+        }
+        // Track timeout stats
+        if (timeouts.length > 0) {
+          stats.ordersTimedOut += timeouts.length;
+          stats.marketSellsPlaced += timeouts.filter(t => t.action === 'market_sell_placed').length;
         }
         // Update pending orders count
         stats.pendingOrders = storage.getPendingOrderCount();

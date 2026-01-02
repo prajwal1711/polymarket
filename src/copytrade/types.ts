@@ -152,7 +152,7 @@ export interface CopiedTrade {
   copySize: number | null;
   copyCost: number | null;
   orderId: string | null;
-  status: 'pending' | 'placed' | 'filled' | 'failed' | 'skipped';
+  status: 'pending' | 'placed' | 'filled' | 'failed' | 'skipped' | 'cancelled';
   skipReason: string | null;
   createdAt: string;
   executedAt: string | null;
@@ -213,6 +213,10 @@ export interface CopytradeConfig {
   // Safety
   requireConfirmation: boolean; // Require CONFIRM env var
   dryRun: boolean;              // Don't actually place orders
+
+  // Order timeout settings
+  buyOrderTimeoutSec: number;   // Cancel unfilled BUY orders after this many seconds
+  sellOrderTimeoutSec: number;  // Cancel unfilled SELL orders after this many seconds, then market sell
 }
 
 // Pending order awaiting fill confirmation
@@ -240,6 +244,19 @@ export interface FillResult {
   fillPrice: number;
   fillSize: number;
   filledAt: string;
+}
+
+// Result from order timeout handling
+export interface TimeoutResult {
+  orderId: string;
+  copiedTradeId: string;
+  tokenId: string;
+  conditionId: string;
+  targetAddress: string;
+  side: 'BUY' | 'SELL';
+  action: 'cancelled' | 'market_sell_placed' | 'cancel_failed';
+  marketSellOrderId?: string;  // If market sell was placed
+  reason: string;
 }
 
 // Default configuration
@@ -272,4 +289,8 @@ export const DEFAULT_CONFIG: CopytradeConfig = {
   // Safety
   requireConfirmation: true,
   dryRun: false,
+
+  // Order timeout settings
+  buyOrderTimeoutSec: 90,       // Cancel unfilled BUY orders after 90 seconds
+  sellOrderTimeoutSec: 300,     // Cancel unfilled SELL orders after 5 minutes, then market sell
 };

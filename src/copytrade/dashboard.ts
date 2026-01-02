@@ -14,6 +14,7 @@ import cookieParser from 'cookie-parser';
 import crypto from 'crypto';
 import { CopytradeStorage } from './storage';
 import { PolymarketDataApi } from './data-api';
+import { TraderScorer } from '../scoring/scorer';
 
 const PORT = parseInt(process.env.COPYTRADE_DASHBOARD_PORT || '3457', 10);
 const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || 'admin';
@@ -56,9 +57,10 @@ const app = express();
 app.use(express.json());
 app.use(cookieParser());
 
-// Initialize storage
+// Initialize storage and services
 const storage = new CopytradeStorage();
 const dataApi = new PolymarketDataApi();
+const traderScorer = new TraderScorer();
 
 // Apply auth middleware to all routes
 app.use(authMiddleware);
@@ -247,6 +249,7 @@ app.get('/api/summary', (req: Request, res: Response) => {
     const openPositions = storage.getOpenPositions();
     const targets = storage.getTargets(false);
     const pendingOrders = storage.getPendingOrderCount();
+    const timeoutStats = storage.getTimeoutStats();
 
     // Calculate total exposure
     const totalExposure = openPositions.reduce((sum, p) => sum + p.totalCost, 0);
@@ -268,6 +271,9 @@ app.get('/api/summary', (req: Request, res: Response) => {
         totalTradesCopied: stats.totalTradesCopied,
         totalCost: stats.totalCost,
         pendingOrders: pendingOrders,
+        cancelledOrders: timeoutStats.cancelledOrders,
+        cancelledBuys: timeoutStats.cancelledBuys,
+        cancelledSells: timeoutStats.cancelledSells,
       },
       targets: {
         total: targets.length,
@@ -1115,6 +1121,10 @@ app.get('/', (req: Request, res: Response) => {
           <div class="stat-value" id="totalRuns">0</div>
           <div class="stat-label">Poll Runs</div>
         </div>
+        <div class="stat">
+          <div class="stat-value" id="timedOutOrders">0</div>
+          <div class="stat-label">Timed Out</div>
+        </div>
       </div>
     </div>
 
@@ -1426,6 +1436,7 @@ app.get('/', (req: Request, res: Response) => {
       document.getElementById('tradesCopied').textContent = data.activity.totalTradesCopied;
       document.getElementById('pendingOrders').textContent = data.activity.pendingOrders || 0;
       document.getElementById('totalRuns').textContent = data.activity.totalRuns;
+      document.getElementById('timedOutOrders').textContent = data.activity.cancelledOrders || 0;
       document.getElementById('targetsEnabled').textContent = data.targets.enabled;
       document.getElementById('targetsTotal').textContent = data.targets.total;
     }
@@ -2382,6 +2393,909 @@ app.get('/', (req: Request, res: Response) => {
       </div>
     </div>
   </div>
+</body>
+</html>
+  `);
+});
+
+// ============ Scoring API ============
+
+// Score a trader
+app.get('/api/score/:address', async (req: Request, res: Response) => {
+  const { address } = req.params;
+
+  // Validate address format
+  if (!address.match(/^0x[a-fA-F0-9]{40}$/)) {
+    return res.status(400).json({ error: 'Invalid wallet address format' });
+  }
+
+  try {
+    const score = await traderScorer.scoreTrader(address);
+    res.json({
+      success: true,
+      score: {
+        overall: score.overall,
+        grade: score.grade,
+        recommendation: score.recommendation,
+        breakdown: score.breakdown,
+        metrics: {
+          ...score.metrics,
+          firstTradeDate: score.metrics.firstTradeDate?.toISOString() || null,
+          lastTradeDate: score.metrics.lastTradeDate?.toISOString() || null,
+        },
+        evaluatedAt: score.evaluatedAt.toISOString(),
+      },
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============ Score Page ============
+
+app.get('/score', (req: Request, res: Response) => {
+  res.send(`
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Trader Scorer - Copytrade</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Mono', 'Droid Sans Mono', monospace;
+      background: #0a0a0a;
+      color: #00ff00;
+      padding: 20px;
+      min-height: 100vh;
+    }
+
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+    }
+
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+    }
+
+    .back-link {
+      color: #888;
+      text-decoration: none;
+      font-size: 14px;
+    }
+    .back-link:hover { color: #fff; }
+
+    .terminal {
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .terminal-header {
+      background: #161b22;
+      padding: 10px 15px;
+      border-bottom: 1px solid #30363d;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .terminal-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+    }
+    .terminal-dot.red { background: #ff5f56; }
+    .terminal-dot.yellow { background: #ffbd2e; }
+    .terminal-dot.green { background: #27c93f; }
+
+    .terminal-title {
+      color: #8b949e;
+      font-size: 13px;
+      margin-left: 10px;
+    }
+
+    .terminal-body {
+      padding: 20px;
+      min-height: 400px;
+    }
+
+    .input-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+
+    .prompt {
+      color: #58a6ff;
+      font-weight: bold;
+    }
+
+    .input-field {
+      flex: 1;
+      background: transparent;
+      border: none;
+      color: #00ff00;
+      font-family: inherit;
+      font-size: 14px;
+      outline: none;
+    }
+
+    .input-field::placeholder {
+      color: #484f58;
+    }
+
+    .btn-score {
+      background: #238636;
+      color: #fff;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 13px;
+    }
+    .btn-score:hover { background: #2ea043; }
+    .btn-score:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .output {
+      white-space: pre-wrap;
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    .output-line {
+      margin-bottom: 2px;
+    }
+
+    .color-green { color: #3fb950; }
+    .color-red { color: #f85149; }
+    .color-yellow { color: #d29922; }
+    .color-blue { color: #58a6ff; }
+    .color-gray { color: #8b949e; }
+    .color-white { color: #f0f6fc; }
+    .color-cyan { color: #39c5cf; }
+
+    .grade-a { color: #3fb950; font-weight: bold; }
+    .grade-b { color: #58a6ff; font-weight: bold; }
+    .grade-c { color: #d29922; font-weight: bold; }
+    .grade-d { color: #db6d28; font-weight: bold; }
+    .grade-f { color: #f85149; font-weight: bold; }
+
+    .progress-bar {
+      display: inline-block;
+      font-family: inherit;
+    }
+
+    .loading {
+      display: none;
+      color: #8b949e;
+    }
+    .loading.active { display: block; }
+
+    .cursor {
+      display: inline-block;
+      width: 8px;
+      height: 16px;
+      background: #00ff00;
+      animation: blink 1s step-end infinite;
+      vertical-align: middle;
+      margin-left: 2px;
+    }
+
+    @keyframes blink {
+      50% { opacity: 0; }
+    }
+
+    .score-history {
+      margin-top: 30px;
+      padding-top: 20px;
+      border-top: 1px solid #30363d;
+    }
+
+    .history-title {
+      color: #8b949e;
+      font-size: 12px;
+      margin-bottom: 10px;
+    }
+
+    .history-item {
+      display: flex;
+      justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px solid #21262d;
+      cursor: pointer;
+    }
+    .history-item:hover { background: #161b22; }
+
+    .history-address {
+      color: #58a6ff;
+      font-size: 12px;
+    }
+
+    .history-score {
+      font-size: 12px;
+    }
+
+    /* Charts section */
+    .charts-section {
+      display: none;
+      margin-top: 30px;
+    }
+    .charts-section.active {
+      display: block;
+    }
+    .charts-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 20px;
+      margin-bottom: 20px;
+    }
+    @media (max-width: 768px) {
+      .charts-grid { grid-template-columns: 1fr; }
+    }
+    .chart-card {
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 15px;
+    }
+    .chart-card.full-width {
+      grid-column: span 2;
+    }
+    @media (max-width: 768px) {
+      .chart-card.full-width { grid-column: span 1; }
+    }
+    .chart-title {
+      color: #8b949e;
+      font-size: 12px;
+      text-transform: uppercase;
+      margin-bottom: 10px;
+      letter-spacing: 1px;
+    }
+    .chart-container {
+      position: relative;
+      height: 200px;
+    }
+    .chart-container.tall {
+      height: 250px;
+    }
+    .gauge-container {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 180px;
+    }
+    .gauge {
+      position: relative;
+      width: 160px;
+      height: 160px;
+    }
+    .gauge-circle {
+      transform: rotate(-90deg);
+    }
+    .gauge-bg {
+      fill: none;
+      stroke: #21262d;
+      stroke-width: 12;
+    }
+    .gauge-fill {
+      fill: none;
+      stroke-width: 12;
+      stroke-linecap: round;
+      transition: stroke-dashoffset 0.5s ease;
+    }
+    .gauge-text {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      text-align: center;
+    }
+    .gauge-score {
+      font-size: 36px;
+      font-weight: bold;
+      color: #fff;
+    }
+    .gauge-grade {
+      font-size: 14px;
+      margin-top: 4px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <a href="/" class="back-link">&larr; Back to Dashboard</a>
+    </div>
+
+    <div class="terminal">
+      <div class="terminal-header">
+        <div class="terminal-dot red"></div>
+        <div class="terminal-dot yellow"></div>
+        <div class="terminal-dot green"></div>
+        <span class="terminal-title">trader-scorer -- bash</span>
+      </div>
+
+      <div class="terminal-body">
+        <div class="output" id="output">
+<span class="color-cyan">╔═══════════════════════════════════════════════════════════════╗</span>
+<span class="color-cyan">║</span>  <span class="color-white">POLYMARKET TRADER SCORER</span>                                    <span class="color-cyan">║</span>
+<span class="color-cyan">╚═══════════════════════════════════════════════════════════════╝</span>
+
+<span class="color-gray">Evaluate any trader before copying their trades.</span>
+<span class="color-gray">Enter a wallet address below to get a detailed score.</span>
+
+</div>
+
+        <div class="input-row">
+          <span class="prompt">$</span>
+          <input type="text" class="input-field" id="addressInput" placeholder="0x... (paste wallet address)" />
+          <button class="btn-score" id="scoreBtn" onclick="scoreTrader()">Score</button>
+        </div>
+
+        <div class="loading" id="loading">
+          <span class="color-gray">Fetching trades and calculating score</span><span class="cursor"></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="score-history" id="historySection" style="display: none;">
+      <div class="history-title">RECENT EVALUATIONS</div>
+      <div id="historyList"></div>
+    </div>
+
+    <!-- Charts Section -->
+    <div class="charts-section" id="chartsSection">
+      <div class="charts-grid">
+        <!-- Score Gauge -->
+        <div class="chart-card">
+          <div class="chart-title">Overall Score</div>
+          <div class="gauge-container">
+            <div class="gauge">
+              <svg class="gauge-circle" width="160" height="160" viewBox="0 0 160 160">
+                <circle class="gauge-bg" cx="80" cy="80" r="70"></circle>
+                <circle class="gauge-fill" id="gaugeFill" cx="80" cy="80" r="70"
+                  stroke-dasharray="439.8" stroke-dashoffset="439.8"></circle>
+              </svg>
+              <div class="gauge-text">
+                <div class="gauge-score" id="gaugeScore">--</div>
+                <div class="gauge-grade" id="gaugeGrade">--</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Score Breakdown Radar -->
+        <div class="chart-card">
+          <div class="chart-title">Score Breakdown</div>
+          <div class="chart-container">
+            <canvas id="radarChart"></canvas>
+          </div>
+        </div>
+
+        <!-- Win/Loss Donut -->
+        <div class="chart-card">
+          <div class="chart-title">Win/Loss Distribution</div>
+          <div class="chart-container">
+            <canvas id="winLossChart"></canvas>
+          </div>
+        </div>
+
+        <!-- Risk Metrics Bar -->
+        <div class="chart-card">
+          <div class="chart-title">Risk Metrics</div>
+          <div class="chart-container">
+            <canvas id="riskChart"></canvas>
+          </div>
+        </div>
+
+        <!-- P&L Comparison -->
+        <div class="chart-card full-width">
+          <div class="chart-title">All-Time vs Recent (30 Days)</div>
+          <div class="chart-container">
+            <canvas id="comparisonChart"></canvas>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const history = JSON.parse(localStorage.getItem('scoreHistory') || '[]');
+    renderHistory();
+
+    document.getElementById('addressInput').addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') scoreTrader();
+    });
+
+    function renderHistory() {
+      if (history.length === 0) return;
+      document.getElementById('historySection').style.display = 'block';
+      const list = document.getElementById('historyList');
+      list.innerHTML = history.slice(0, 5).map(h => \`
+        <div class="history-item" onclick="loadFromHistory('\${h.address}')">
+          <span class="history-address">\${h.address.substring(0, 10)}...\${h.address.slice(-6)}</span>
+          <span class="history-score \${getGradeClass(h.grade)}">\${h.score}/100 (\${h.grade})</span>
+        </div>
+      \`).join('');
+    }
+
+    function loadFromHistory(address) {
+      document.getElementById('addressInput').value = address;
+      scoreTrader();
+    }
+
+    function getGradeClass(grade) {
+      return 'grade-' + grade.toLowerCase();
+    }
+
+    function formatNumber(n, decimals = 2) {
+      return n.toFixed(decimals);
+    }
+
+    function formatSigned(n) {
+      const abs = Math.abs(n).toFixed(2);
+      return n >= 0 ? '+$' + abs : '-$' + abs;
+    }
+
+    function formatPercent(n) {
+      const abs = Math.abs(n).toFixed(1);
+      return n >= 0 ? '+' + abs + '%' : '-' + abs + '%';
+    }
+
+    function progressBar(value, width = 20) {
+      const filled = Math.round((value / 100) * width);
+      const empty = width - filled;
+      return '[' + '='.repeat(filled) + ' '.repeat(empty) + ']';
+    }
+
+    function relativeDate(isoString) {
+      if (!isoString) return 'N/A';
+      const date = new Date(isoString);
+      const now = new Date();
+      const diffMs = now - date;
+      const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+      if (diffDays === 0) return 'Today';
+      if (diffDays === 1) return 'Yesterday';
+      if (diffDays < 7) return diffDays + ' days ago';
+      if (diffDays < 30) return Math.floor(diffDays / 7) + ' weeks ago';
+      if (diffDays < 365) return Math.floor(diffDays / 30) + ' months ago';
+      return Math.floor(diffDays / 365) + ' years ago';
+    }
+
+    async function scoreTrader() {
+      const address = document.getElementById('addressInput').value.trim();
+
+      if (!address) {
+        appendOutput('<span class="color-red">Error: Please enter a wallet address</span>\\n');
+        return;
+      }
+
+      if (!address.match(/^0x[a-fA-F0-9]{40}$/)) {
+        appendOutput('<span class="color-red">Error: Invalid wallet address format</span>\\n');
+        return;
+      }
+
+      // Show loading
+      document.getElementById('loading').classList.add('active');
+      document.getElementById('scoreBtn').disabled = true;
+
+      appendOutput('<span class="color-gray">$ score ' + address + '</span>\\n');
+      appendOutput('<span class="color-gray">Evaluating trader...</span>\\n\\n');
+
+      try {
+        const response = await fetch('/api/score/' + address);
+        const data = await response.json();
+
+        document.getElementById('loading').classList.remove('active');
+        document.getElementById('scoreBtn').disabled = false;
+
+        if (!response.ok || !data.success) {
+          appendOutput('<span class="color-red">Error: ' + (data.error || 'Failed to score trader') + '</span>\\n\\n');
+          return;
+        }
+
+        const { score } = data;
+        const { metrics, breakdown, overall, grade, recommendation } = score;
+
+        // Add to history
+        history.unshift({ address, score: Math.round(overall), grade });
+        if (history.length > 10) history.pop();
+        localStorage.setItem('scoreHistory', JSON.stringify(history));
+        renderHistory();
+
+        // Render the report
+        const gradeLabels = { A: 'EXCELLENT', B: 'GOOD', C: 'AVERAGE', D: 'BELOW AVG', F: 'POOR' };
+        const gradeClass = getGradeClass(grade);
+
+        let output = '';
+        output += '<span class="color-cyan">════════════════════════════════════════════════════════════════</span>\\n';
+        output += '<span class="color-white">TRADER EVALUATION:</span> <span class="color-blue">' + address.substring(0, 10) + '...' + address.slice(-6) + '</span>\\n';
+        output += '<span class="color-cyan">════════════════════════════════════════════════════════════════</span>\\n\\n';
+
+        output += '<span class="color-white">SCORE:</span> <span class="' + gradeClass + '">' + Math.round(overall) + '/100</span>  ';
+        output += '<span class="' + gradeClass + '">[' + grade + ' - ' + gradeLabels[grade] + ']</span>\\n\\n';
+
+        output += '<span class="color-white">SCORE BREAKDOWN</span>\\n';
+        output += '<span class="color-gray">────────────────────────────────────────────────────────────────</span>\\n';
+
+        // Profitability (40%)
+        output += '  <span class="color-gray">PROFITABILITY (40%)</span>\\n';
+        const profitItems = [
+          { name: 'ROI', score: breakdown.roiScore, weight: 20 },
+          { name: 'Recent ROI', score: breakdown.recentRoiScore, weight: 10 },
+          { name: 'Expectancy', score: breakdown.expectancyScore, weight: 10 },
+        ];
+        for (const item of profitItems) {
+          const bar = progressBar(item.score, 12);
+          const scoreColor = item.score >= 70 ? 'color-green' : (item.score >= 40 ? 'color-yellow' : 'color-red');
+          output += '    ' + item.name.padEnd(12) + ' <span class="' + scoreColor + '">' + bar + '</span> ';
+          output += '<span class="color-white">' + Math.round(item.score).toString().padStart(3) + '/100</span> ';
+          output += '<span class="color-gray">(' + item.weight + '%)</span>\\n';
+        }
+
+        // Risk Management (35%)
+        output += '  <span class="color-gray">RISK MANAGEMENT (35%)</span>\\n';
+        const riskItems = [
+          { name: 'Sharpe', score: breakdown.sharpeScore, weight: 15 },
+          { name: 'Drawdown', score: breakdown.drawdownScore, weight: 10 },
+          { name: 'Profit Factor', score: breakdown.profitFactorScore, weight: 10 },
+        ];
+        for (const item of riskItems) {
+          const bar = progressBar(item.score, 12);
+          const scoreColor = item.score >= 70 ? 'color-green' : (item.score >= 40 ? 'color-yellow' : 'color-red');
+          output += '    ' + item.name.padEnd(12) + ' <span class="' + scoreColor + '">' + bar + '</span> ';
+          output += '<span class="color-white">' + Math.round(item.score).toString().padStart(3) + '/100</span> ';
+          output += '<span class="color-gray">(' + item.weight + '%)</span>\\n';
+        }
+
+        // Consistency (25%)
+        output += '  <span class="color-gray">CONSISTENCY (25%)</span>\\n';
+        const consistItems = [
+          { name: 'Win Rate', score: breakdown.winRateScore, weight: 10 },
+          { name: 'Activity', score: breakdown.consistencyScore, weight: 10 },
+          { name: 'Streaks', score: breakdown.streakHealthScore, weight: 5 },
+        ];
+        for (const item of consistItems) {
+          const bar = progressBar(item.score, 12);
+          const scoreColor = item.score >= 70 ? 'color-green' : (item.score >= 40 ? 'color-yellow' : 'color-red');
+          output += '    ' + item.name.padEnd(12) + ' <span class="' + scoreColor + '">' + bar + '</span> ';
+          output += '<span class="color-white">' + Math.round(item.score).toString().padStart(3) + '/100</span> ';
+          output += '<span class="color-gray">(' + item.weight + '%)</span>\\n';
+        }
+        output += '\\n';
+
+        output += '<span class="color-white">PROFITABILITY</span>\\n';
+        output += '<span class="color-gray">────────────────────────────────────────────────────────────────</span>\\n';
+        const pnlColor = metrics.totalPnl >= 0 ? 'color-green' : 'color-red';
+        const realizedColor = metrics.realizedPnl >= 0 ? 'color-green' : 'color-red';
+        const unrealizedColor = metrics.unrealizedPnl >= 0 ? 'color-green' : 'color-red';
+        const roiColor = metrics.roi >= 0 ? 'color-green' : 'color-red';
+
+        output += '  Total P&L:       <span class="' + pnlColor + '">' + formatSigned(metrics.totalPnl) + '</span>\\n';
+        output += '    Realized:      <span class="' + realizedColor + '">' + formatSigned(metrics.realizedPnl) + '</span>\\n';
+        output += '    Unrealized:    <span class="' + unrealizedColor + '">' + formatSigned(metrics.unrealizedPnl) + '</span>\\n';
+        output += '  ROI:             <span class="' + roiColor + '">' + formatPercent(metrics.roi) + '</span>\\n';
+        output += '  Win Rate:        <span class="color-white">' + formatNumber(metrics.winRate, 1) + '%</span> ';
+        output += '<span class="color-gray">(' + metrics.winCount + '/' + metrics.totalTrades + ' trades)</span>\\n';
+        const pfDisplay = isFinite(metrics.profitFactor) ? formatNumber(metrics.profitFactor) + 'x' : 'Infinite';
+        output += '  Profit Factor:   <span class="color-white">' + pfDisplay + '</span>\\n\\n';
+
+        // Risk Metrics section
+        output += '<span class="color-white">RISK METRICS</span>\\n';
+        output += '<span class="color-gray">────────────────────────────────────────────────────────────────</span>\\n';
+        const sharpeLabel = metrics.sharpeRatio >= 2 ? '(Excellent)' : metrics.sharpeRatio >= 1 ? '(Good)' : metrics.sharpeRatio >= 0 ? '(Fair)' : '(Poor)';
+        const sharpeColor = metrics.sharpeRatio >= 1 ? 'color-green' : metrics.sharpeRatio >= 0 ? 'color-yellow' : 'color-red';
+        output += '  Sharpe Ratio:    <span class="' + sharpeColor + '">' + formatNumber(metrics.sharpeRatio) + ' ' + sharpeLabel + '</span>\\n';
+        output += '  Sortino Ratio:   <span class="color-white">' + (isFinite(metrics.sortinoRatio) ? formatNumber(metrics.sortinoRatio) : 'Infinite') + '</span>\\n';
+        const ddColor = metrics.maxDrawdown <= 20 ? 'color-green' : metrics.maxDrawdown <= 50 ? 'color-yellow' : 'color-red';
+        output += '  Max Drawdown:    <span class="' + ddColor + '">-' + formatNumber(metrics.maxDrawdown, 1) + '% (-$' + formatNumber(metrics.maxDrawdownDollar) + ')</span>\\n';
+        output += '  Risk/Reward:     <span class="color-white">' + (isFinite(metrics.riskRewardRatio) ? formatNumber(metrics.riskRewardRatio) + 'x' : 'Infinite') + '</span>\\n\\n';
+
+        // Expectancy section
+        output += '<span class="color-white">EXPECTANCY</span>\\n';
+        output += '<span class="color-gray">────────────────────────────────────────────────────────────────</span>\\n';
+        const expColor = metrics.expectancy >= 0 ? 'color-green' : 'color-red';
+        output += '  Per Trade:       <span class="' + expColor + '">' + formatSigned(metrics.expectancy) + '</span>\\n';
+        output += '  Kelly Optimal:   <span class="color-white">' + formatNumber(metrics.kellyPercent, 1) + '% position size</span>\\n\\n';
+
+        // Streaks section
+        output += '<span class="color-white">STREAKS</span>\\n';
+        output += '<span class="color-gray">────────────────────────────────────────────────────────────────</span>\\n';
+        output += '  Max Win Streak:  <span class="color-green">' + metrics.maxWinStreak + '</span>\\n';
+        output += '  Max Lose Streak: <span class="color-red">' + metrics.maxLoseStreak + '</span>\\n';
+        const streakStr = metrics.currentStreak > 0 ? '+' + metrics.currentStreak + ' (winning)' : metrics.currentStreak < 0 ? metrics.currentStreak + ' (losing)' : '0';
+        const streakColor = metrics.currentStreak > 0 ? 'color-green' : metrics.currentStreak < 0 ? 'color-red' : 'color-white';
+        output += '  Current:         <span class="' + streakColor + '">' + streakStr + '</span>\\n\\n';
+
+        // Recency section
+        output += '<span class="color-white">RECENCY (Last 30 Days)</span>\\n';
+        output += '<span class="color-gray">────────────────────────────────────────────────────────────────</span>\\n';
+        const recentRoiColor = metrics.recentRoi30d >= 0 ? 'color-green' : 'color-red';
+        output += '  Recent ROI:      <span class="' + recentRoiColor + '">' + formatPercent(metrics.recentRoi30d) + '</span>\\n';
+        output += '  Recent Win Rate: <span class="color-white">' + formatNumber(metrics.recentWinRate30d, 1) + '%</span>\\n';
+        output += '  Recent Trades:   <span class="color-white">' + metrics.recentTrades30d + '</span>\\n';
+        const recentPnlColor = metrics.recentPnl30d >= 0 ? 'color-green' : 'color-red';
+        output += '  Recent P&L:      <span class="' + recentPnlColor + '">' + formatSigned(metrics.recentPnl30d) + '</span>\\n';
+        const trend = metrics.recentRoi30d > metrics.roi ? 'IMPROVING ^' : metrics.recentRoi30d < metrics.roi - 5 ? 'DECLINING v' : 'STABLE -';
+        const trendColor = trend.includes('IMPROVING') ? 'color-green' : trend.includes('DECLINING') ? 'color-red' : 'color-yellow';
+        output += '  Trend:           <span class="' + trendColor + '">' + trend + '</span>\\n\\n';
+
+        output += '<span class="color-white">TRADE STATISTICS</span>\\n';
+        output += '<span class="color-gray">────────────────────────────────────────────────────────────────</span>\\n';
+        output += '  Total Trades:    <span class="color-white">' + metrics.totalTrades + '</span> closed\\n';
+        output += '  Trade Volume:    <span class="color-white">$' + formatNumber(metrics.totalVolume) + '</span>\\n';
+        output += '  Avg Trade Size:  <span class="color-white">$' + formatNumber(metrics.avgTradeSize) + '</span>\\n';
+        output += '  Avg Win:         <span class="color-green">$' + formatNumber(metrics.avgWinSize) + '</span>\\n';
+        output += '  Avg Loss:        <span class="color-red">$' + formatNumber(metrics.avgLossSize) + '</span>\\n';
+        output += '  Largest Win:     <span class="color-green">$' + formatNumber(metrics.largestWin) + '</span>\\n';
+        output += '  Largest Loss:    <span class="color-red">$' + formatNumber(metrics.largestLoss) + '</span>\\n\\n';
+
+        output += '<span class="color-white">ACTIVITY</span>\\n';
+        output += '<span class="color-gray">────────────────────────────────────────────────────────────────</span>\\n';
+        output += '  First Trade:     <span class="color-white">' + relativeDate(metrics.firstTradeDate) + '</span>\\n';
+        output += '  Last Trade:      <span class="color-white">' + relativeDate(metrics.lastTradeDate) + '</span>\\n';
+        output += '  Active Days:     <span class="color-white">' + metrics.activeDays + '</span>\\n';
+        output += '  Trades/Day:      <span class="color-white">' + formatNumber(metrics.tradesPerDay, 1) + '</span>\\n';
+        output += '  Open Positions:  <span class="color-white">' + metrics.openPositions + '</span>\\n';
+        output += '  Open Exposure:   <span class="color-white">$' + formatNumber(metrics.openExposure) + '</span>\\n\\n';
+
+        output += '<span class="color-white">RECOMMENDATION</span>\\n';
+        output += '<span class="color-gray">────────────────────────────────────────────────────────────────</span>\\n';
+        const recLines = recommendation.split('\\n');
+        for (const line of recLines) {
+          output += '  <span class="color-yellow">' + line + '</span>\\n';
+        }
+        output += '\\n';
+
+        output += '<span class="color-cyan">════════════════════════════════════════════════════════════════</span>\\n\\n';
+
+        appendOutput(output);
+
+        // Render the charts
+        renderCharts(score);
+
+      } catch (error) {
+        document.getElementById('loading').classList.remove('active');
+        document.getElementById('scoreBtn').disabled = false;
+        appendOutput('<span class="color-red">Error: ' + error.message + '</span>\\n\\n');
+      }
+    }
+
+    function appendOutput(html) {
+      const output = document.getElementById('output');
+      output.innerHTML += html;
+      output.scrollTop = output.scrollHeight;
+    }
+
+    // Chart instances (for cleanup)
+    let radarChart, winLossChart, riskChart, comparisonChart;
+
+    function renderCharts(score) {
+      const { metrics, breakdown, overall, grade } = score;
+
+      // Show charts section
+      document.getElementById('chartsSection').classList.add('active');
+
+      // Render gauge
+      renderGauge(overall, grade);
+
+      // Render radar chart
+      renderRadarChart(breakdown);
+
+      // Render win/loss donut
+      renderWinLossChart(metrics);
+
+      // Render risk metrics bar
+      renderRiskChart(metrics);
+
+      // Render comparison chart
+      renderComparisonChart(metrics);
+    }
+
+    function getGradeColor(grade) {
+      const colors = { A: '#3fb950', B: '#58a6ff', C: '#d29922', D: '#db6d28', F: '#f85149' };
+      return colors[grade] || '#888';
+    }
+
+    function renderGauge(score, grade) {
+      const gaugeFill = document.getElementById('gaugeFill');
+      const gaugeScore = document.getElementById('gaugeScore');
+      const gaugeGrade = document.getElementById('gaugeGrade');
+
+      const circumference = 439.8;
+      const offset = circumference - (score / 100) * circumference;
+      const color = getGradeColor(grade);
+
+      gaugeFill.style.stroke = color;
+      gaugeFill.style.strokeDashoffset = offset;
+      gaugeScore.textContent = Math.round(score);
+      gaugeGrade.textContent = grade;
+      gaugeGrade.style.color = color;
+    }
+
+    function renderRadarChart(breakdown) {
+      const ctx = document.getElementById('radarChart').getContext('2d');
+
+      if (radarChart) radarChart.destroy();
+
+      radarChart = new Chart(ctx, {
+        type: 'radar',
+        data: {
+          labels: ['ROI', 'Recent', 'Expectancy', 'Sharpe', 'Drawdown', 'PF', 'Win Rate', 'Activity', 'Streaks'],
+          datasets: [{
+            data: [
+              breakdown.roiScore,
+              breakdown.recentRoiScore,
+              breakdown.expectancyScore,
+              breakdown.sharpeScore,
+              breakdown.drawdownScore,
+              breakdown.profitFactorScore,
+              breakdown.winRateScore,
+              breakdown.consistencyScore,
+              breakdown.streakHealthScore
+            ],
+            backgroundColor: 'rgba(88, 166, 255, 0.2)',
+            borderColor: '#58a6ff',
+            borderWidth: 2,
+            pointBackgroundColor: '#58a6ff',
+            pointBorderColor: '#fff',
+            pointRadius: 3
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { display: false } },
+          scales: {
+            r: {
+              min: 0,
+              max: 100,
+              ticks: { stepSize: 25, color: '#8b949e', backdropColor: 'transparent' },
+              grid: { color: '#30363d' },
+              angleLines: { color: '#30363d' },
+              pointLabels: { color: '#8b949e', font: { size: 10 } }
+            }
+          }
+        }
+      });
+    }
+
+    function renderWinLossChart(metrics) {
+      const ctx = document.getElementById('winLossChart').getContext('2d');
+
+      if (winLossChart) winLossChart.destroy();
+
+      winLossChart = new Chart(ctx, {
+        type: 'doughnut',
+        data: {
+          labels: ['Wins', 'Losses', 'Break-even'],
+          datasets: [{
+            data: [metrics.winCount, metrics.lossCount, metrics.breakEvenCount || 0],
+            backgroundColor: ['#3fb950', '#f85149', '#6e7681'],
+            borderColor: '#0d1117',
+            borderWidth: 2
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          cutout: '60%',
+          plugins: {
+            legend: {
+              position: 'bottom',
+              labels: { color: '#8b949e', padding: 15, font: { size: 11 } }
+            }
+          }
+        }
+      });
+    }
+
+    function renderRiskChart(metrics) {
+      const ctx = document.getElementById('riskChart').getContext('2d');
+
+      if (riskChart) riskChart.destroy();
+
+      // Normalize values for display
+      const sharpe = Math.min(Math.max(metrics.sharpeRatio, -2), 3);
+      const sortino = Math.min(Math.max(metrics.sortinoRatio || 0, 0), 5);
+      const rr = Math.min(Math.max(metrics.riskRewardRatio || 0, 0), 5);
+      const pf = Math.min(Math.max(metrics.profitFactor || 0, 0), 3);
+
+      riskChart = new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels: ['Sharpe', 'Sortino', 'R/R', 'PF'],
+          datasets: [{
+            data: [sharpe, sortino, rr, pf],
+            backgroundColor: [
+              sharpe >= 1 ? '#3fb950' : sharpe >= 0 ? '#d29922' : '#f85149',
+              sortino >= 2 ? '#3fb950' : sortino >= 1 ? '#d29922' : '#f85149',
+              rr >= 1.5 ? '#3fb950' : rr >= 1 ? '#d29922' : '#f85149',
+              pf >= 1.5 ? '#3fb950' : pf >= 1 ? '#d29922' : '#f85149'
+            ],
+            borderRadius: 4
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          indexAxis: 'y',
+          plugins: { legend: { display: false } },
+          scales: {
+            x: {
+              grid: { color: '#21262d' },
+              ticks: { color: '#8b949e' }
+            },
+            y: {
+              grid: { display: false },
+              ticks: { color: '#8b949e' }
+            }
+          }
+        }
+      });
+    }
+
+    function renderComparisonChart(metrics) {
+      const ctx = document.getElementById('comparisonChart').getContext('2d');
+
+      if (comparisonChart) comparisonChart.destroy();
+
+      comparisonChart = new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels: ['ROI %', 'Win Rate %', 'P&L ($)'],
+          datasets: [
+            {
+              label: 'All-Time',
+              data: [metrics.roi, metrics.winRate, metrics.totalPnl / 100],
+              backgroundColor: '#58a6ff',
+              borderRadius: 4
+            },
+            {
+              label: 'Last 30 Days',
+              data: [metrics.recentRoi30d, metrics.recentWinRate30d, metrics.recentPnl30d / 100],
+              backgroundColor: '#3fb950',
+              borderRadius: 4
+            }
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: {
+              position: 'top',
+              labels: { color: '#8b949e', padding: 10 }
+            }
+          },
+          scales: {
+            x: {
+              grid: { color: '#21262d' },
+              ticks: { color: '#8b949e' }
+            },
+            y: {
+              grid: { color: '#21262d' },
+              ticks: { color: '#8b949e' }
+            }
+          }
+        }
+      });
+    }
+  </script>
 </body>
 </html>
   `);

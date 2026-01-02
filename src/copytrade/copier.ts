@@ -10,7 +10,7 @@ import axios from 'axios';
 
 import { PolymarketDataApi, DataApiTrade } from './data-api';
 import { CopytradeStorage } from './storage';
-import { CopiedTrade, CopytradeConfig, CopytradeRun, DEFAULT_CONFIG, GuardrailEvaluation, RuleEvaluation, PendingOrder, FillResult } from './types';
+import { CopiedTrade, CopytradeConfig, CopytradeRun, DEFAULT_CONFIG, GuardrailEvaluation, RuleEvaluation, PendingOrder, FillResult, TimeoutResult } from './types';
 
 const CLOB_HOST = 'https://clob.polymarket.com';
 
@@ -875,6 +875,34 @@ export class Copier {
   }
 
   /**
+   * Cancel an open order
+   */
+  private async cancelOrder(orderId: string): Promise<{ success: boolean; error?: string }> {
+    if (!this.l2Client) {
+      return { success: false, error: 'Client not initialized' };
+    }
+
+    try {
+      await this.l2Client.cancelOrder({ orderID: orderId });
+      return { success: true };
+    } catch (error: any) {
+      const msg = error?.response?.data?.error || error?.message || String(error);
+      return { success: false, error: msg.substring(0, 200) };
+    }
+  }
+
+  /**
+   * Place a market sell order (limit at $0.01 for immediate fill at best bid)
+   */
+  private async placeMarketSell(
+    tokenId: string,
+    size: number
+  ): Promise<{ success: boolean; orderId?: string; error?: string }> {
+    // Market sell = limit sell at $0.01 (will fill at best available bid due to price improvement)
+    return this.placeSellOrder(tokenId, size, 0.01);
+  }
+
+  /**
    * Print run summary
    */
   private printSummary(run: CopytradeRun): void {
@@ -948,23 +976,25 @@ export class Copier {
   }
 
   /**
-   * Check pending orders for fills and process them
-   * Returns list of orders that were confirmed as filled
+   * Check pending orders for fills and timeouts
+   * Returns list of orders that were confirmed as filled and timeout results
    */
-  async checkPendingOrders(): Promise<FillResult[]> {
+  async checkPendingOrders(): Promise<{ fills: FillResult[]; timeouts: TimeoutResult[] }> {
     const pendingOrders = this.storage.getPendingOrders();
     if (pendingOrders.length === 0) {
-      return [];
+      return { fills: [], timeouts: [] };
     }
 
     if (!this.l2Client) {
       console.log('CLOB client not initialized - cannot check fills');
-      return [];
+      return { fills: [], timeouts: [] };
     }
 
     console.log(`\nChecking ${pendingOrders.length} pending order(s) for fills...`);
 
     const fills: FillResult[] = [];
+    const timeouts: TimeoutResult[] = [];
+    const now = Date.now();
 
     try {
       // Get our filled trades from the CLOB
@@ -1025,8 +1055,24 @@ export class Copier {
           // Or it could be cancelled - for now we'll leave it pending
           console.log(`  PENDING: Order ${pending.orderId.substring(0, 12)}... (not yet filled or confirmed)`);
         } else {
-          // Order is still open on the book
-          console.log(`  OPEN: Order ${pending.orderId.substring(0, 12)}... still on order book`);
+          // Order is still open on the book - check for timeout
+          const placedAtMs = new Date(pending.placedAt).getTime();
+          const ageSeconds = (now - placedAtMs) / 1000;
+
+          const timeoutSec = pending.side === 'BUY'
+            ? this.config.buyOrderTimeoutSec
+            : this.config.sellOrderTimeoutSec;
+
+          if (ageSeconds >= timeoutSec) {
+            // Order has timed out
+            console.log(`  TIMEOUT: ${pending.side} order ${pending.orderId.substring(0, 12)}... (${Math.floor(ageSeconds)}s old, timeout: ${timeoutSec}s)`);
+
+            const timeoutResult = await this.handleOrderTimeout(pending);
+            timeouts.push(timeoutResult);
+          } else {
+            const remainingSec = Math.ceil(timeoutSec - ageSeconds);
+            console.log(`  OPEN: Order ${pending.orderId.substring(0, 12)}... still on book (${remainingSec}s until timeout)`);
+          }
         }
       }
 
@@ -1034,7 +1080,96 @@ export class Copier {
       console.error(`Error checking pending orders: ${error.message}`);
     }
 
-    return fills;
+    return { fills, timeouts };
+  }
+
+  /**
+   * Handle a timed out order - cancel BUYs, market sell for SELLs
+   */
+  private async handleOrderTimeout(pending: PendingOrder): Promise<TimeoutResult> {
+    const baseResult: Omit<TimeoutResult, 'action' | 'reason' | 'marketSellOrderId'> = {
+      orderId: pending.orderId,
+      copiedTradeId: pending.copiedTradeId,
+      tokenId: pending.tokenId,
+      conditionId: pending.conditionId,
+      targetAddress: pending.targetAddress,
+      side: pending.side,
+    };
+
+    // First, try to cancel the original order
+    const cancelResult = await this.cancelOrder(pending.orderId);
+
+    if (!cancelResult.success) {
+      console.log(`    Failed to cancel order: ${cancelResult.error}`);
+      return {
+        ...baseResult,
+        action: 'cancel_failed',
+        reason: cancelResult.error || 'Unknown error',
+      };
+    }
+
+    console.log(`    Cancelled order ${pending.orderId.substring(0, 12)}...`);
+
+    // Update the copied trade status to cancelled
+    this.storage.updateCopiedTradeStatus(pending.copiedTradeId, 'cancelled', {
+      skipReason: `Order timed out after ${pending.side === 'BUY' ? this.config.buyOrderTimeoutSec : this.config.sellOrderTimeoutSec}s`,
+    });
+
+    // Remove from pending orders
+    this.storage.removePendingOrder(pending.orderId);
+
+    if (pending.side === 'BUY') {
+      // For BUY orders, we just cancel and we're done
+      console.log(`    BUY order cancelled - no position opened`);
+      return {
+        ...baseResult,
+        action: 'cancelled',
+        reason: `BUY order timed out after ${this.config.buyOrderTimeoutSec}s - cancelled`,
+      };
+    } else {
+      // For SELL orders, place a market sell to exit the position
+      console.log(`    SELL order timed out - placing market sell at $0.01...`);
+
+      const marketSellResult = await this.placeMarketSell(pending.tokenId, pending.expectedSize);
+
+      if (!marketSellResult.success) {
+        console.log(`    Failed to place market sell: ${marketSellResult.error}`);
+        return {
+          ...baseResult,
+          action: 'cancel_failed',
+          reason: `Original SELL cancelled but market sell failed: ${marketSellResult.error}`,
+        };
+      }
+
+      console.log(`    Market sell placed: Order ${marketSellResult.orderId?.substring(0, 12)}...`);
+
+      // Save the new market sell order as pending
+      if (marketSellResult.orderId) {
+        this.storage.savePendingOrder({
+          orderId: marketSellResult.orderId,
+          copiedTradeId: pending.copiedTradeId,  // Reuse the same trade ID
+          tokenId: pending.tokenId,
+          conditionId: pending.conditionId,
+          targetAddress: pending.targetAddress,
+          side: 'SELL',
+          expectedSize: pending.expectedSize,
+          expectedPrice: 0.01,  // Market sell price
+        });
+
+        // Update the copied trade with the new order ID
+        this.storage.updateCopiedTradeStatus(pending.copiedTradeId, 'pending', {
+          orderId: marketSellResult.orderId,
+          skipReason: `Original limit SELL timed out, market sell placed`,
+        });
+      }
+
+      return {
+        ...baseResult,
+        action: 'market_sell_placed',
+        marketSellOrderId: marketSellResult.orderId,
+        reason: `SELL order timed out after ${this.config.sellOrderTimeoutSec}s - market sell placed`,
+      };
+    }
   }
 
   /**
